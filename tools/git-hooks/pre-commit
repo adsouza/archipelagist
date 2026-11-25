@@ -1,0 +1,4 @@
+#!/bin/sh
+# Rejects a commit whose @imports break the layering in src/tools/check_deps.zig.
+# Enable once per clone with: git config core.hooksPath tools/git-hooks
+exec zig build check-deps

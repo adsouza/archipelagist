@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      # zig build test runs zig build check-deps first.
+      - name: Test
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+      - name: Build the game
+        run: zig build -Doptimize=ReleaseSafe
+
+  linux-cross:
+    name: Cross-compile for x86_64 Linux from macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - name: Build
+        run: zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+      - name: Check the binary
+        run: file zig-out/linux-x86_64/bin/archipelagist | grep -q "ELF 64-bit LSB.*x86-64"

@@ -1,0 +1,49 @@
+# Archipelagist architecture
+
+## Layers
+
+The source is split into four folders, and dependencies point one way: tools and the app use the shell and the core, the shell uses the core, and the core uses only Zig's standard library.
+
+- `src/core` is the functional core: the rules, the read models, and the pure save and journal codecs. It does no I/O, logging, timing, audio, or drawing.
+- `src/shell` adapts the core to files, tracing, and crash diagnostics.
+- `src/app` is the raylib game: window, input, drawing, and sound.
+- `src/tools` holds the replay, lane-baking, and dependency-checking programs.
+
+Each folder is its own module in `build.zig`, with its own `root.zig` or entry point, and is given only the modules below it. The compiler therefore rejects an import that reaches into another folder by path, or a module the folder was not given. `zig build check-deps` (which `zig build test` also runs) enforces the rest from the table in `src/tools/check_deps.zig`: which named modules each folder may import, and the layer order of the files inside each folder, so that imports point down and there are no cycles. The one deliberate exception is the `Game` aggregate: `colony.zig` and the parts it owns (`fleet.zig`, `ferry.zig`, `bridge.zig`, `charter.zig`, `roads.zig`) share a layer and may import each other. Every new `.zig` file has to be placed in that table before the check passes.
+
+## Domain and use cases
+
+`colony.zig` owns the game aggregate, `Game`. Tiles and harvest stocks, settlers, island stores, the ferry, and the fleet share a consistency boundary. A departure can reserve berths, beds, and cargo space and debit supplies in one operation. `Game` keeps the island state itself and holds the rest as parts: `Ferry`, `Fleet`, and `Charter`. Their rules live in `ferry.zig`, `fleet.zig`, and `charter.zig`, and the bridge rules live in `bridge.zig`. Each rule is a function on the aggregate that `Game` exposes as a method, so callers keep using `game.sendExpedition(...)` and the reservation and debit stay in one step. `colony.zig` keeps construction, production, and daily upkeep. Geography, navigation rules, and road reachability are domain modules. They depend on Zig and the map data.
+
+The ferry is not tied to one strait. It is moored at one harbor and can sail, with or without a load, to any harbor on a lane from there, or survey an uncharted one. A lane is a leg no longer than the Bali Strait crossing (9 game seconds; other legs scale with the distance between harbors) whose straight course passes no other island. Bali to Lombok is a lane; Bali to Sumbawa is in range but crosses Lombok, so the ferry calls at Lombok first. Surveys beyond Bali, the charter's island, wait until the charter is complete, as expedition surveys do. Lanes are baked into `ferry_lanes.zig`, and a test recomputes them from the geography.
+
+Terrain, resource sites, harbor layouts, and bridgeheads live in `terrain.zig`, which is the source data for the islands. `zig build bake-lanes` regenerates `ferry_lanes.zig` after the geography changes.
+
+`gameplay.zig` exposes the commands used by the game. A command consumes explicit input and produces a corresponding state and outcome. The core owns the calendar: `Game.day_time` holds the seconds elapsed in the current day, and the single `advance` command moves voyages and the clock by up to one day of game seconds, running the daily upkeep when a day ends. The shell only converts frame time and the chosen speed into game seconds. `transition` takes an immutable input state and writes to caller-owned output storage. The live frame loop uses the same reducer through `apply`, which updates its uniquely owned state in place to avoid copying the map every frame. Neither form reads the clock, plays a sound, writes a save, or emits logs.
+
+`queries.zig` provides read-only ledger projections. The header and ledger draw from the same projection. The query side uses the live aggregate and ordinary domain reads, with no secondary database or refresh cycle.
+
+`main.zig` owns the frame timer, game speed, selection and camera state, rendering, and input. It translates input into commands and uses the outcomes to display messages and play sounds. Arrival and day reports describe what just happened. They are transient and are consumed in the frame that produced them. Save files are the durable game state. `save.zig` is a deterministic codec: a save is every field of `Game` in declaration order, and decoding checks the invariants the rules rely on, so a corrupt save is rejected. Only the current format is read. `save_store.zig`, `window_settings.zig`, and `audio.zig` adapt it and the game to filesystem, windowing, and sound APIs.
+
+## Diagnostics and recovery
+
+`gameplay_trace.zig` decorates the command boundary. It records inputs before mutation, results and duration after mutation, voyage arrivals, and daily shortages. `diagnostics.zig` provides the same span format to the storage and window adapters, collects Zig logs on the main thread, and records startup, audio availability, cue requests, render stalls, and periodic frame context. Rendering and routine voyage frames do not produce one record per drawing call or frame.
+
+The app keeps `diagnostics/trace.jsonl` and `diagnostics/trace.previous.jsonl` beside the save. It rotates the current file on startup and at 1 MiB. Each normal record has a wall-clock timestamp, monotonic elapsed time, sequence, area, and event name. Matched begin and end records share a span number. A second process unable to lock the trace files continues with standard terminal logging. Set `ARCHIPELAGIST_TRACE_DIR` to choose a separate directory.
+
+The app also keeps a command journal, `diagnostics/journal.bin`, with the last run's journal as `journal.previous.bin`. `journal.zig` is the pure codec and replayer, and `journal_file.zig` is the file adapter. The journal starts with a snapshot of the session and then records every command before it is applied, so a crash inside the rules still leaves the command that caused it. After each day it records a fingerprint of the state. Loading a save, restarting, or reaching the 8 MiB limit starts a new segment with a fresh snapshot. The journal is written by the same process that holds the trace lock, and a write failure disables it without affecting the game.
+
+To reproduce a session headlessly, run `zig build replay -- path/to/journal.bin`. It replays the commands with the game's own reducer and reports commands, denials, days, and the first checkpoint that disagrees (exit status 3). `--until N` stops after N commands, `--verbose` prints each command and outcome as JSON lines, and `--save out.sav` writes the resulting state as a save the game can load. Replays are exact on the same platform and build. A journal from another CPU architecture may diverge if floating-point results differ, which the checkpoints will show.
+
+On macOS and Linux a Zig panic writes a best-effort marker to the active trace before Zig prints its stack trace in the terminal. For a native crash or forced termination, inspect the last diagnostics and the operating system's crash report. The logs contain game command inputs and outcomes, without copying the save or environment variables. The files stay local.
+
+An unavailable diagnostics sink leaves commands and saves operational. The save adapter writes a temporary file, syncs it, and atomically replaces the destination on success. Failed autosaves can retry on the next scheduled attempt. An unreadable current save stays protected until the player explicitly restarts the charter.
+
+## Verification
+
+- `zig build test -Doptimize=ReleaseSafe` checks dependencies and runs the core, shell, tool, and presentation suites.
+- `zig test -OReleaseSafe --test-filter property --dep core -Mroot=src/shell/root.zig -Mcore=src/core/root.zig` runs only the generated properties. Failing scenarios print their seed.
+- `stateful.zig` runs random command sequences from a fresh game and from a completed charter, and checks invariants after every command: denied commands change nothing, goods are never created and are exactly conserved while sailing, only exports earn coins, settlers are conserved between days, the calendar stays consistent, ferries, ships, berths, beds, and holds stay within capacity, the ferry sails only along lanes, and every state survives a save round trip. The whole run is then replayed from its journal. A failure is shrunk to a short sequence and printed as JSON lines.
+- `zig build mutation-test` generates mutants from the rule modules by operator (relational, equality, arithmetic, saturating, compound assignment, logical, boolean, constants, deleted statements, and negated conditions) and runs the tests against each in a disposable copy. Comments, strings, and test blocks are never mutated. By default it runs a reproducible sample of 40 spread across files and operators, and fails below an 80% kill ratio. Mutants that do not compile are reported and left out of the score. Pass options after `--`: `--all`, `--sample N`, `--seed N`, `--file ferry.zig`, `--operator relational`, `--list`, `--jobs N`, `--threshold 0.9`. Mutants no test could ever tell apart are listed with a reason in `tools/mutants.ignore`. It requires Python 3.10 or newer and Zig.
+
+The properties exercise generated command sequences replayed from the journal, the core clock, rejection atomicity, separate state transitions, parallel cargo and berth reservations, conservation through reload, harvest recovery, water caps, and invalid session fields.
