@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # zig-pkg also holds the Emscripten SDK that raylib-zig installs on the
       # first web build, so a cached run skips that download.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: zig-pkg
           key: zig-pkg-web-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
@@ -32,7 +32,7 @@ jobs:
           version: 0.17.1
       - name: Build for the web
         run: zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall --summary all
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: zig-out/web
 
@@ -44,4 +44,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
