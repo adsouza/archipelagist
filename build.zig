@@ -234,6 +234,11 @@ fn buildWeb(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     settings.put("EXPORTED_RUNTIME_METHODS", "['FS','ccall']") catch @panic("OOM");
     // SAFE_HEAP checks every memory access and makes the game crawl.
     _ = settings.remove("SAFE_HEAP");
+    // Emscripten's default 64 KiB stack is far smaller than a native thread's
+    // 8 MiB. Loading or writing a save keeps a ~200 KiB save.Session and its
+    // ~200 KiB encoding on the stack, which overflows 64 KiB and corrupts
+    // memory (in ReleaseSmall it shows up as "RuntimeError: null function").
+    settings.put("STACK_SIZE", "8388608") catch @panic("OOM");
     const emcc = emsdk.emccStep(b, &.{}, &.{ rl.artifact("raylib"), game }, .{
         .optimize = optimize,
         .flags = flags,
