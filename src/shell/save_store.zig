@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const save = @import("core").save;
 const diagnostics = @import("diagnostics.zig");
+const browser = @import("browser.zig");
 
 const app_dir = "Archipelagist";
 const save_name = "archipelagist.sav";
@@ -24,6 +25,7 @@ pub const Store = struct {
                 if (std.fs.path.isAbsolute(home)) break :blk try std.fs.path.join(allocator, &.{ home, ".local", "share" });
                 break :blk null;
             },
+            .emscripten => browser.save_root,
             else => null,
         };
         const directory = base orelse return .{ .io = process.io, .path = save_name };
@@ -67,6 +69,7 @@ pub const Store = struct {
             return err;
         };
         if (span) |operation| self.trace.?.finish("storage", "commit", operation, "ok", .{});
+        browser.persist();
     }
 
     fn commitAtomic(self: Store, path: []const u8, bytes: []const u8) !void {

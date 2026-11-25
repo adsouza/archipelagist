@@ -5,7 +5,7 @@
 The source is split into four folders, and dependencies point one way: tools and the app use the shell and the core, the shell uses the core, and the core uses only Zig's standard library.
 
 - `src/core` is the functional core: the rules, the read models, and the pure save and journal codecs. It does no I/O, logging, timing, audio, or drawing.
-- `src/shell` adapts the core to files, tracing, and crash diagnostics.
+- `src/shell` adapts the core to files, tracing, and crash diagnostics. `browser.zig` holds what differs in the browser build: saves go under `/persist`, an Emscripten IDBFS mount that `src/app/web/shell.html` loads from IndexedDB before the game starts and `save_store.zig` flushes after each save.
 - `src/app` is the raylib game: window, input, drawing, and sound.
 - `src/tools` holds the replay, lane-baking, and dependency-checking programs.
 
@@ -29,7 +29,7 @@ Terrain, resource sites, harbor layouts, and bridgeheads live in `terrain.zig`, 
 
 `gameplay_trace.zig` decorates the command boundary. It records inputs before mutation, results and duration after mutation, voyage arrivals, and daily shortages. `diagnostics.zig` provides the same span format to the storage and window adapters, collects Zig logs on the main thread, and records startup, audio availability, cue requests, render stalls, and periodic frame context. Rendering and routine voyage frames do not produce one record per drawing call or frame.
 
-The app keeps `diagnostics/trace.jsonl` and `diagnostics/trace.previous.jsonl` beside the save. It rotates the current file on startup and at 1 MiB. Each normal record has a wall-clock timestamp, monotonic elapsed time, sequence, area, and event name. Matched begin and end records share a span number. A second process unable to lock the trace files continues with standard terminal logging. Set `ARCHIPELAGIST_TRACE_DIR` to choose a separate directory.
+The app keeps `diagnostics/trace.jsonl` and `diagnostics/trace.previous.jsonl` beside the save. It rotates the current file on startup and at 1 MiB. Each normal record has a wall-clock timestamp, monotonic elapsed time, sequence, area, and event name. Matched begin and end records share a span number. A second process unable to lock the trace files continues with standard terminal logging. Set `ARCHIPELAGIST_TRACE_DIR` to choose a separate directory. In the browser build the trace and journal live in Emscripten's in-memory filesystem and are lost when the tab closes; standard logging goes to the browser console.
 
 The app also keeps a command journal, `diagnostics/journal.bin`, with the last run's journal as `journal.previous.bin`. `journal.zig` is the pure codec and replayer, and `journal_file.zig` is the file adapter. The journal starts with a snapshot of the session and then records every command before it is applied, so a crash inside the rules still leaves the command that caused it. After each day it records a fingerprint of the state. Loading a save, restarting, or reaching the 8 MiB limit starts a new segment with a fresh snapshot. The journal is written by the same process that holds the trace lock, and a write failure disables it without affecting the game.
 

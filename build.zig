@@ -1,4 +1,5 @@
 const std = @import("std");
+const raylib_build = @import("raylib_zig");
 
 /// The layers, lowest first. Each is a build module rooted in its own folder,
 /// so the compiler rejects an import that reaches outside it, and each module
@@ -31,6 +32,7 @@ const Layers = struct {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    if (target.result.os.tag == .emscripten) return buildWeb(b, target, optimize);
     const rl = b.dependency("raylib_zig", .{
         .target = target,
         .optimize = optimize,
@@ -197,4 +199,51 @@ fn useVendoredX11(b: *std.Build, raylib: *std.Build.Step.Compile) void {
     // The game never reads images from the clipboard, and on X11 that is the
     // one raylib feature that calls libX11 directly instead of through GLFW.
     module.addCMacro("SUPPORT_CLIPBOARD_IMAGE", "0");
+}
+
+/// `zig build -Dtarget=wasm32-emscripten` compiles the game to WebAssembly
+/// with Emscripten and installs a static site (index.html, index.js,
+/// index.wasm) to zig-out/web, ready for GitHub Pages. The first such build
+/// downloads the Emscripten SDK; native builds never do.
+fn buildWeb(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const rl = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+        .rmodels = false,
+        .raudio = true,
+    });
+    const layers = Layers.init(b, target, optimize);
+    const game = b.addLibrary(.{
+        .name = "archipelagist",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/app/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "core", .module = layers.core },
+                .{ .name = "shell", .module = layers.shell },
+                .{ .name = "raylib", .module = rl.module("raylib") },
+            },
+        }),
+    });
+    const emsdk = raylib_build.emsdk;
+    var flags = emsdk.emccDefaultFlags(b.allocator, .{ .optimize = optimize, .asyncify = true, .fsanitize = false });
+    // Saves live in IndexedDB through Emscripten's IDBFS (see src/app/web/shell.html).
+    flags.put("-lidbfs.js", {}) catch @panic("OOM");
+    var settings = emsdk.emccDefaultSettings(b.allocator, .{ .optimize = optimize, .memory_growth = true });
+    settings.put("EXPORTED_RUNTIME_METHODS", "['FS','ccall']") catch @panic("OOM");
+    // SAFE_HEAP checks every memory access and makes the game crawl.
+    _ = settings.remove("SAFE_HEAP");
+    const emcc = emsdk.emccStep(b, &.{}, &.{ rl.artifact("raylib"), game }, .{
+        .optimize = optimize,
+        .flags = flags,
+        .settings = settings,
+        .shell_file_path = b.path("src/app/web/shell.html"),
+        .out_file_name = "index.html",
+        .install_dir = .{ .custom = "web" },
+    }) catch |err| @panic(@errorName(err));
+    b.getInstallStep().dependOn(emcc);
+    const emrun = emsdk.emrunStep(b, b.path("zig-out/web/index.html"), &.{}) catch |err| @panic(@errorName(err));
+    emrun.dependOn(emcc);
+    b.step("run", "Build the browser version and open it with emrun").dependOn(emrun);
 }

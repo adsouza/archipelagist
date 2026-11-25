@@ -15,6 +15,7 @@ pub const panic = std.debug.FullPanic(diagnostics.crash);
 pub const std_options: std.Options = .{ .logFn = diagnostics.log };
 const save = @import("core").save;
 const save_store = @import("shell").save_store;
+const browser = @import("shell").browser;
 const stock_warnings = @import("core").stock_warnings;
 const window_settings = @import("window_settings.zig");
 const game_title = "Archipelagist";
@@ -1103,7 +1104,9 @@ pub fn main(process: std.process.Init) !void {
     var trace_storage: ?diagnostics.Trace = null;
     var journal_storage: ?journal_file.Recorder = null;
     if (capture == null or trace_override != null) {
-        const directory = trace_override orelse try std.fs.path.join(process.arena.allocator(), &.{
+        // In the browser, traces stay in memory and print to the console, so
+        // they don't fill the IndexedDB storage that holds the save.
+        const directory = trace_override orelse if (browser.enabled) "/tmp/archipelagist/diagnostics" else try std.fs.path.join(process.arena.allocator(), &.{
             std.fs.path.dirname(store.path) orelse ".", "diagnostics",
         });
         trace_storage = diagnostics.Trace.open(process.io, store.dir, directory) catch |err| trace: {
