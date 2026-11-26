@@ -255,6 +255,8 @@ pub const Game = struct {
     stores: [settlement_count]Stores = .{starting_stores} ++ @as([settlement_count - 1]Stores, @splat(.{})),
     diets: [settlement_count]Diet = @splat(.{}),
     bridges: bridge.Bridges = @splat(false),
+    /// Settlers out on a bridge, between islands.
+    walkers: bridge.Walkers = .{},
     coins: u16 = 8,
     people: u16 = 2,
     island_people: [settlement_count - 1]u16 = @splat(0),
@@ -303,6 +305,8 @@ pub const Game = struct {
     pub const bridgeProblem = bridge.bridgeProblem;
     pub const buildBridge = bridge.buildBridge;
     pub const crossBridge = bridge.crossBridge;
+    pub const walkingTo = bridge.walkingTo;
+    pub const advanceWalkers = bridge.advanceWalkers;
     pub const hasBridge = bridge.hasBridge;
     pub const footWalk = bridge.footWalk;
     pub const footpathProblem = bridge.footpathProblem;
@@ -526,6 +530,7 @@ pub const Game = struct {
     pub fn awayFromJava(g: *const Game) u32 {
         var away: u32 = g.ferry.passengers;
         for (g.vessels()) |vessel| away += vessel.passengers;
+        away += @intCast(g.walkers.count);
         for (g.island_people) |population| away += population;
         return away;
     }
@@ -587,7 +592,7 @@ pub const Game = struct {
         for (g.vessels()) |vessel| {
             if (vessel.phase == .outbound and vessel.chart == chart) total +|= vessel.passengers;
         }
-        return total;
+        return total +| g.walkingTo(chart);
     }
 
     pub fn incomingCargo(g: *const Game, chart: usize) Stores {

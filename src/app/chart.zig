@@ -155,6 +155,7 @@ pub const View = struct {
             a.drawBridge(crossing, true);
             a.bridgeTraffic(g, crossing, time);
         }
+        a.bridgeWalkers(g, time);
         a.ship(g, time);
         for (g.vessels(), 0..) |_, id| a.explorationShip(g, id, time);
     }

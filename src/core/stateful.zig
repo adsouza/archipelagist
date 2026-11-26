@@ -39,6 +39,8 @@ pub const Scenario = enum {
             game.bridges[0] = true;
             game.charter.ferried_to_bali = true;
             game.openPort(1);
+            // Roads to both bridgeheads, so random crossings put walkers on the bridge.
+            if (random.boolean()) game.paveBridge(domain.bridge.strait);
         }
         return game;
     }
@@ -221,6 +223,12 @@ pub fn check(before: *const domain.Game, after: *const domain.Game, command: Com
             return .init("ship passengers fit the ship", "ship {d}: {d} passengers", .{ id, vessel.passengers });
         if (vessel.surveying and (vessel.phase != .outbound or after.islandOpen(vessel.chart) or vessel.passengers > domain.camp_capacity))
             return .init("ships survey only uncharted harbors, carrying at most a new camp", "ship {d} to {d}", .{ id, vessel.chart });
+    }
+    for (after.walkers.active(), 0..) |walker, index| {
+        if (walker.crossing >= domain.crossings.len or !after.bridges[walker.crossing] or !domain.crossings[walker.crossing].joins(walker.destination))
+            return .init("settlers walk only built bridges, toward one of their ends", "walker {d} on crossing {d}", .{ index, walker.crossing });
+        if (!(walker.elapsed >= 0 and walker.elapsed < walker.walkSeconds()))
+            return .init("a walker is part way across", "walker {d}: {d} of {d} seconds", .{ index, walker.elapsed, walker.walkSeconds() });
     }
     for (0..domain.settlement_count) |chart| {
         if (after.berthsUsed(chart) > domain.dock_capacity)

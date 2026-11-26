@@ -336,11 +336,27 @@ pub fn drawBridge(crossing: usize, built: bool) void {
     line(bridgePoint(crossing, 0, 3), bridgePoint(crossing, 1, 3), 2, 0x876448);
 }
 
+/// Residents strolling a bridge whose roads reach both shores: one from each
+/// side, out onto the bridge and back. A road that stops short leaves the
+/// bridge to the settlers actually crossing it.
 pub fn bridgeTraffic(g: *const s.Game, crossing: usize, t: f32) void {
+    if (g.footpathProblem(crossing) != null) return;
     for (s.crossings[crossing].charts, 0..) |chart, side| {
         if (g.residents(chart) == 0) continue;
-        const progress = 0.5 - 0.46 * @cos(t * 0.22 + f(side) * 2.3 + f(crossing));
+        const reach = 0.46 - 0.46 * @cos(t * 0.22 + f(side) * 2.3 + f(crossing));
+        const progress = if (side == 0) reach else 1 - reach;
         settler(bridgePoint(crossing, progress, if (side == 0) -4 else 0), if (side == 0) 0x855a46 else 0x456870);
+    }
+}
+
+/// Settlers walking a bridge, each where the core has walked them.
+/// Eastbound walkers keep to the north rail, westbound to the south.
+pub fn bridgeWalkers(g: *const s.Game, t: f32) void {
+    for (g.walkers.active(), 0..) |walker, i| {
+        const outbound = walker.destination == s.crossings[walker.crossing].charts[1];
+        const stride = @abs(@sin(t * 9 + f(i) * 1.7)) * 1.2;
+        const lane: f32 = if (outbound) -4 else 0;
+        settler(bridgePoint(walker.crossing, walker.position(), lane - stride), if (outbound) 0x855a46 else 0x456870);
     }
 }
 

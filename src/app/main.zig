@@ -287,18 +287,20 @@ const UI = struct {
         }
         if (built) {
             if (u.g.footpathProblem(crossing) != null) return u.bridgeRoads(crossing, names, footer_y);
-            label("Move a settler to a free bed on the other island.", 309, 276, 19, ink, false);
+            num("Send a settler walking to a free bed on the other island ({d}s across).", .{
+                @as(u32, @intFromFloat(@round(c.walkSeconds()))),
+            }, 309, 276, 19, ink);
             for (c.charts, names, 0..) |chart, name, row| {
-                num("{s}   {d} resident{s}   /   {d} places available", .{
-                    name, u.g.residents(chart), if (u.g.residents(chart) == 1) "" else "s", u.g.freeLandingSpace(chart),
+                num("{s}   {d} resident{s}   /   {d} places available   /   {d} walking in", .{
+                    name, u.g.residents(chart), if (u.g.residents(chart) == 1) "" else "s", u.g.freeLandingSpace(chart), u.g.walkingTo(chart),
                 }, 309, 310 + a.f(row) * 30, 19, ink);
             }
             var caption: [2][64]u8 = undefined;
             for (c.charts, names, 0..) |chart, name, side| {
                 const x = 309 + a.f(side) * 298;
-                const move = std.fmt.bufPrintSentinel(&caption[side], "Move 1 to {s}", .{name}, 0) catch unreachable;
+                const move = std.fmt.bufPrintSentinel(&caption[side], "Walk 1 to {s}", .{name}, 0) catch unreachable;
                 if (button(move, x, 376, 278, 36)) {
-                    u.modal_note = u.dispatch(.{ .cross_bridge = .{ .crossing = crossing, .destination = chart } }).problem() orelse "A settler crossed the bridge.";
+                    u.modal_note = u.dispatch(.{ .cross_bridge = .{ .crossing = crossing, .destination = chart } }).problem() orelse "A settler set out across the bridge.";
                 }
                 const transfer = std.fmt.bufPrintSentinel(&caption[side], "Transfer stores from {s}", .{name}, 0) catch unreachable;
                 if (button(transfer, x, 424, 278, 36)) u.openManifest(.{ .bridge = .{ .crossing = crossing, .source = chart } });
@@ -967,6 +969,13 @@ const UI = struct {
                 },
                 .returned => u.setMessage("Expedition ship #{d} is back at Java.", .{event.ship + 1}),
                 .none => {},
+            },
+            .walker => |event| {
+                const island = s.chart_names[event.island];
+                if (event.island != 0 and u.g.housing(event.island) == 0)
+                    u.setMessage("A settler walked over the bridge to the {s} camp.", .{island})
+                else
+                    u.setMessage("A settler walked over the bridge to {s}.", .{island});
             },
         }
     }

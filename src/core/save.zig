@@ -162,12 +162,29 @@ fn valid(g: *const s.Game) bool {
             if ((founded and !open) or (g.residents(chart) > 0 and !founded)) return false;
         }
     }
+    if (!validWalkers(g)) return false;
     if (!validFerry(g)) return false;
     if (g.fleet.count > g.fleet.vessels.len) return false;
     for (g.vessels()) |vessel| {
         if (vessel.ship == .none) return false;
     }
     return validFleet(g);
+}
+
+/// Every walker is part way across a built bridge, bound for one of its
+/// ends. Unused slots hold the default walker so equal games encode alike.
+fn validWalkers(g: *const s.Game) bool {
+    if (g.walkers.count > s.bridge.max_walkers) return false;
+    for (g.walkers.items, 0..) |walker, index| {
+        if (index >= g.walkers.count) {
+            if (!std.meta.eql(walker, s.bridge.Walker{})) return false;
+            continue;
+        }
+        if (walker.crossing >= s.crossings.len or !g.bridges[walker.crossing]) return false;
+        if (!s.crossings[walker.crossing].joins(walker.destination)) return false;
+        if (!std.math.isFinite(walker.elapsed) or walker.elapsed < 0 or walker.elapsed >= walker.walkSeconds()) return false;
+    }
+    return true;
 }
 
 fn validFerry(g: *const s.Game) bool {
@@ -475,6 +492,11 @@ test "cargo resumes at sea and local stock pays for the bridge on both shores" {
     try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(0, 0).?);
     g.paveBridge(0);
     try std.testing.expect(g.crossBridge(0, 0) == null);
+    // A settler halfway across the bridge survives a save.
+    _ = g.advanceWalkers(s.crossings[0].walkSeconds() / 2);
+    g = decode(&encode(g)).?;
+    try std.testing.expectEqual(@as(usize, 1), g.walkers.count);
+    _ = g.advanceWalkers(s.crossings[0].walkSeconds() / 2);
     try std.testing.expectEqual(@as(u16, 5), g.residents(0));
     g.stores[1].timber = 3;
     try std.testing.expect(g.sendCargo(0, 1, .{ .timber = 2 }) == null);
@@ -988,4 +1010,29 @@ test "a ferry passage to Lombok survives a reload and a corrupt route is rejecte
     bytes[destination] = s.settlement_count;
     try std.testing.expect(decode(&bytes) == null);
 
+}
+
+test "saves reject walkers off a bridge, past its end, or in unused slots" {
+    var g = s.Game.init();
+    g.ferry.surveyed = true;
+    g.openPort(1);
+    g.bridges[0] = true;
+    g.paveBridge(0);
+    try std.testing.expect(g.crossBridge(0, 1) == null);
+    try std.testing.expect(decode(&encode(g)) != null);
+    const cases = [_]struct { walker: usize, value: s.bridge.Walker }{
+        .{ .walker = 0, .value = .{ .crossing = 1, .destination = 1 } },
+        .{ .walker = 0, .value = .{ .crossing = 0, .destination = 2 } },
+        .{ .walker = 0, .value = .{ .crossing = 0, .destination = 1, .elapsed = s.crossings[0].walkSeconds() } },
+        .{ .walker = 0, .value = .{ .crossing = 0, .destination = 1, .elapsed = -1 } },
+        .{ .walker = 1, .value = .{ .crossing = 0, .destination = 1 } },
+    };
+    for (cases) |case| {
+        var bad = g;
+        bad.walkers.items[case.walker] = case.value;
+        try std.testing.expect(decode(&encode(bad)) == null);
+    }
+    var crowded = g;
+    crowded.walkers.count = s.bridge.max_walkers + 1;
+    try std.testing.expect(decode(&encode(crowded)) == null);
 }

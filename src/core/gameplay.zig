@@ -11,7 +11,8 @@ pub const Command = union(enum) {
     build: struct { island: usize, cell: domain.Cell, kind: domain.Kind },
     /// Bridge a crossing in `domain.crossings`.
     build_bridge: usize,
-    /// Walk a settler over a bridge to one of its islands.
+    /// Start a settler walking over a bridge to one of its islands. They
+    /// arrive after the walk, as `advance` runs it.
     cross_bridge: struct { crossing: usize, destination: usize },
     transfer_stores: struct { crossing: usize, source: usize, cargo: domain.Stores },
     /// Send the ferry's crew to chart a harbor in range of its mooring.
@@ -46,10 +47,15 @@ pub const Arrival = union(enum) {
         settlers: u16,
         cargo: domain.Stores,
     },
+    /// A settler stepped off a bridge onto `island`.
+    walker: struct {
+        crossing: usize,
+        island: usize,
+    },
 };
 
 pub const Arrivals = struct {
-    items: [domain.max_expedition_ships + 1]Arrival = undefined,
+    items: [domain.max_expedition_ships + 1 + domain.bridge.max_walkers]Arrival = undefined,
     len: usize = 0,
 
     pub fn slice(arrivals: *const Arrivals) []const Arrival {
@@ -185,7 +191,27 @@ pub fn advanceVoyages(game: *domain.Game, seconds: f32) Arrivals {
             .cargo = vessel.cargo,
         } });
     }
+    const landed = game.advanceWalkers(seconds);
+    for (landed.slice()) |walker| report.append(.{ .walker = .{ .crossing = walker.crossing, .island = walker.destination } });
     return report;
+}
+
+test "a bridge crossing lands its settler as an arrival once the walk is done" {
+    var game = domain.Game.init();
+    game.ferry.surveyed = true;
+    game.openPort(1);
+    game.bridges[0] = true;
+    game.paveBridge(0);
+    try std.testing.expect(apply(&game, .{ .cross_bridge = .{ .crossing = 0, .destination = 1 } }) == .applied);
+    const walk = domain.crossings[0].walkSeconds();
+    try std.testing.expectEqual(@as(usize, 0), apply(&game, .{ .advance = walk / 3 }).advanced.arrivals.len);
+    // The rest of the walk, ending before the day does, so Bali's empty stores go untested.
+    const outcome = apply(&game, .{ .advance = walk - walk / 3 });
+    try std.testing.expect(outcome.advanced.day == null);
+    const arrivals = outcome.advanced.arrivals.slice();
+    try std.testing.expectEqual(@as(usize, 1), arrivals.len);
+    try std.testing.expectEqual(@as(usize, 1), arrivals[0].walker.island);
+    try std.testing.expectEqual(@as(u16, 1), game.residents(1));
 }
 
 test "after the charter ends only the clock may be advanced" {

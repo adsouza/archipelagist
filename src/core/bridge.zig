@@ -55,6 +55,57 @@ pub const Crossing = struct {
     pub fn across(crossing: Crossing, chart: usize) usize {
         return if (crossing.charts[0] == chart) crossing.charts[1] else crossing.charts[0];
     }
+
+    /// Game seconds a settler takes to walk from one bridgehead to the other.
+    pub fn walkSeconds(crossing: Crossing) f32 {
+        return @as(f32, @floatFromInt(crossing.spans)) * walk_seconds_per_span;
+    }
+};
+
+/// Game seconds to walk one span. A two-span bridge is quicker than the
+/// ferry's crossing of the same strait.
+pub const walk_seconds_per_span: f32 = 3;
+
+/// Settlers out on all bridges at once.
+pub const max_walkers = 8;
+
+/// A settler on a bridge. They have left one island and are not yet
+/// counted on the other, but their bed there is reserved.
+pub const Walker = struct {
+    crossing: usize = 0,
+    destination: usize = 0,
+    /// Game seconds since the settler stepped onto the bridge.
+    elapsed: f32 = 0,
+
+    pub fn walkSeconds(walker: Walker) f32 {
+        return crossings[walker.crossing].walkSeconds();
+    }
+
+    /// How far along the bridge the settler is, from the first island's
+    /// bridgehead (0) to the second's (1).
+    pub fn position(walker: Walker) f32 {
+        const walked = walker.elapsed / walker.walkSeconds();
+        return if (walker.destination == crossings[walker.crossing].charts[1]) walked else 1 - walked;
+    }
+};
+
+pub const Walkers = struct {
+    items: [max_walkers]Walker = @splat(.{}),
+    count: usize = 0,
+
+    pub fn active(walkers: *const Walkers) []const Walker {
+        return walkers.items[0..walkers.count];
+    }
+};
+
+/// Settlers who reached the far side in one step.
+pub const Landings = struct {
+    items: [max_walkers]Walker = undefined,
+    len: usize = 0,
+
+    pub fn slice(landings: *const Landings) []const Walker {
+        return landings.items[0..landings.len];
+    }
 };
 
 pub const madura = geography.chartNamed("Madura").?;
@@ -189,10 +240,42 @@ pub fn crossBridge(g: *Game, crossing: usize, destination: usize) ?[:0]const u8 
     const source = crossings[crossing].across(destination);
     if (g.residents(source) == 0) return "No settlers are waiting to cross from that island.";
     if (g.freeLandingSpace(destination) == 0) return "There is no room for more settlers at the destination.";
-    // Java's residents are everyone not counted elsewhere.
+    if (g.walkers.count == max_walkers) return "The bridges are crowded. Wait for a settler to reach the far side.";
+    // Java's residents are everyone not counted elsewhere, walkers included.
     if (source != 0) g.island_people[source - 1] -= 1;
-    if (destination != 0) g.island_people[destination - 1] += 1;
+    g.walkers.items[g.walkers.count] = .{ .crossing = crossing, .destination = destination };
+    g.walkers.count += 1;
     return null;
+}
+
+/// Settlers on a bridge heading for `chart`.
+pub fn walkingTo(g: *const Game, chart: usize) u16 {
+    var total: u16 = 0;
+    for (g.walkers.active()) |walker| total += @intFromBool(walker.destination == chart);
+    return total;
+}
+
+/// Walk every settler on a bridge forward and put arrivals ashore.
+pub fn advanceWalkers(g: *Game, seconds: f32) Landings {
+    var landed = Landings{};
+    if (g.isOver()) return landed;
+    var kept: usize = 0;
+    for (0..g.walkers.count) |index| {
+        var walker = g.walkers.items[index];
+        walker.elapsed += seconds;
+        if (walker.elapsed >= walker.walkSeconds()) {
+            g.land(walker.destination, 1, .{});
+            landed.items[landed.len] = walker;
+            landed.len += 1;
+        } else {
+            g.walkers.items[kept] = walker;
+            kept += 1;
+        }
+    }
+    // Unused slots stay at their defaults so equal games encode alike.
+    for (g.walkers.items[kept..g.walkers.count]) |*slot| slot.* = .{};
+    g.walkers.count = kept;
+    return landed;
 }
 
 test "a road to one end of a bridge lets settlers walk on from the other end" {
@@ -270,13 +353,92 @@ test "a Java to Madura bridge carries settlers and stores both ways" {
     try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(1, 0).?);
     g.paveBridge(1);
     try std.testing.expect(g.crossBridge(1, 0) == null);
+    _ = g.advanceWalkers(c.walkSeconds());
     try std.testing.expectEqual(@as(u16, 5), g.residents(0));
     try std.testing.expectEqual(@as(u16, 3), g.residents(madura));
     try std.testing.expect(g.crossBridge(1, madura) == null);
+    _ = g.advanceWalkers(c.walkSeconds());
     try std.testing.expectEqual(@as(u16, 4), g.residents(madura));
     try std.testing.expect(g.sendCargo(1, 0, .{ .grain = 4 }) == null);
     try std.testing.expectEqual(@as(u16, 4), g.stores[madura].grain);
     try std.testing.expect(g.sendCargo(1, madura, .{ .grain = 1 }) == null);
     try std.testing.expectEqual(@as(u16, 7), g.stores[0].grain);
     try std.testing.expectEqualStrings("Choose an island on that bridge.", g.sendCargo(1, 1, .{ .grain = 1 }).?);
+}
+
+/// Java and Bali with the strait bridged, roads to both ends, and settlers on both shores.
+fn bridgedStrait() Game {
+    var g = Game.init();
+    g.ferry.surveyed = true;
+    g.openPort(1);
+    g.bridges[strait] = true;
+    g.island_people[0] = 2;
+    g.people = 2 + 2;
+    g.paveBridge(strait);
+    return g;
+}
+
+test "a settler walks the bridge: away from both shores until the far bridgehead" {
+    var g = bridgedStrait();
+    const walk = crossings[strait].walkSeconds();
+    try std.testing.expectEqual(@as(f32, 2 * walk_seconds_per_span), walk);
+    const beds = g.freeLandingSpace(1);
+    try std.testing.expect(g.crossBridge(strait, 1) == null);
+    // Left Java at once, and is not yet on Bali, but holds a bed there.
+    try std.testing.expectEqual(@as(u16, 1), g.residents(0));
+    try std.testing.expectEqual(@as(u16, 2), g.residents(1));
+    try std.testing.expectEqual(@as(u16, 1), g.walkingTo(1));
+    try std.testing.expectEqual(beds - 1, g.freeLandingSpace(1));
+    try std.testing.expectEqual(@as(u32, 3), g.awayFromJava());
+
+    try std.testing.expectEqual(@as(usize, 0), g.advanceWalkers(walk / 2).len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), g.walkers.active()[0].position(), 1e-6);
+    const landed = g.advanceWalkers(walk / 2);
+    try std.testing.expectEqual(@as(usize, 1), landed.len);
+    try std.testing.expectEqual(@as(usize, 1), landed.slice()[0].destination);
+    try std.testing.expectEqual(@as(u16, 3), g.residents(1));
+    try std.testing.expectEqual(@as(usize, 0), g.walkers.count);
+    try std.testing.expectEqualDeep(Walker{}, g.walkers.items[0]);
+}
+
+test "walkers heading west move from the far bridgehead back toward the first" {
+    var g = bridgedStrait();
+    try std.testing.expect(g.crossBridge(strait, 0) == null);
+    try std.testing.expectEqual(@as(u16, 1), g.residents(1));
+    _ = g.advanceWalkers(crossings[strait].walkSeconds() / 4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), g.walkers.active()[0].position(), 1e-6);
+}
+
+test "settlers set out only once roads reach both ends of the bridge" {
+    var g = bridgedStrait();
+    g.bridges[strait] = false;
+    try std.testing.expectEqualStrings("Build the bridge first.", g.crossBridge(strait, 1).?);
+    var unpaved = Game.init();
+    unpaved.ferry.surveyed = true;
+    unpaved.openPort(1);
+    unpaved.bridges[strait] = true;
+    unpaved.island_people[0] = 2;
+    unpaved.people = 4;
+    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", unpaved.crossBridge(strait, 1).?);
+    try std.testing.expectEqual(@as(usize, 0), unpaved.walkers.count);
+}
+
+test "a full bridge turns settlers away and every walker lands exactly once" {
+    var g = bridgedStrait();
+    // Room on Bali for every walker at once.
+    for (0..3) |i| g.setTile(1, .{ .x = 20 + 2 * i, .y = 20 }, .cottage);
+    g.people += max_walkers;
+    try std.testing.expect(g.freeLandingSpace(1) >= max_walkers + 1);
+    for (0..max_walkers) |_| try std.testing.expect(g.crossBridge(strait, 1) == null);
+    try std.testing.expectEqualStrings("The bridges are crowded. Wait for a settler to reach the far side.", g.crossBridge(strait, 1).?);
+    const people = g.people;
+    var landed: usize = 0;
+    var steps: usize = 0;
+    while (g.walkers.count > 0) : (steps += 1) {
+        landed += g.advanceWalkers(0.7).len;
+        try std.testing.expectEqual(people, g.people);
+    }
+    try std.testing.expectEqual(@as(usize, max_walkers), landed);
+    try std.testing.expectEqual(@as(u16, 2 + max_walkers), g.residents(1));
+    try std.testing.expect(steps > 1);
 }
