@@ -14,7 +14,7 @@ const save = @import("save.zig");
 pub const magic = "AJNL";
 /// Bump when the encoding of `gameplay.Command` or a record changes.
 /// The golden-bytes test below fails when the layout changes without it.
-pub const version: u16 = 3;
+pub const version: u16 = 4;
 pub const header = magic.* ++ std.mem.toBytes(std.mem.nativeToLittle(u16, version));
 
 pub const Kind = enum(u8) { snapshot = 1, command = 2, checkpoint = 3 };
@@ -348,11 +348,11 @@ test "every command kind round-trips through the journal encoding" {
         .build_bridge,
         .{ .cross_bridge = 1 },
         .{ .transfer_stores = .{ .source = 0, .cargo = .{ .timber = 4, .water = 9 } } },
-        .{ .survey_harbor = 2 },
+        .{ .survey_harbor = .{ .destination = 2, .manifest = .{ .settlers = 3, .cargo = .{ .water = 4 } } } },
         .{ .send_ferry = .{ .destination = 1, .manifest = .{ .settlers = 2, .cargo = .{ .grain = 6 } } } },
         .{ .sail_ferry = 0 },
         .{ .build_ship = .{ .island = 0, .hull = .barque } },
-        .{ .survey_island = .{ .ship = 1, .route = 7 } },
+        .{ .survey_island = .{ .ship = 1, .route = 7, .manifest = .{ .settlers = 0, .cargo = .{} } } },
         .{ .send_expedition = .{ .ship = 2, .route = 3, .manifest = .{ .settlers = 5, .cargo = .{ .fruit = 1 } } } },
         .{ .return_expedition = 2 },
         .{ .export_grain = 4 },
@@ -374,7 +374,7 @@ test "the journal layout is pinned so a format change bumps the version" {
     const ferry = encodeCommand(.{ .send_ferry = .{ .destination = 2, .manifest = .{ .settlers = 1, .cargo = .{} } } });
     const expected_ferry = [_]u8{5} ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 1, 0 } ++ @as([12]u8, @splat(0));
     try std.testing.expectEqualSlices(u8, &expected_ferry, ferry.slice());
-    try std.testing.expectEqual(@as(u16, 3), version);
+    try std.testing.expectEqual(@as(u16, 4), version);
 }
 
 test "malformed command bytes are rejected rather than misread" {

@@ -84,7 +84,11 @@ const Modal = enum { none, restart, bridge, shipyard, manifest };
 const ShipyardTab = enum { ferry, expedition, build };
 /// What the manifest dialog loads: the ferry bound for a harbor, an
 /// expedition on a route, or a bridge transfer from an island.
-const Loading = union(enum) { ferry: usize, expedition: usize, bridge: usize };
+const Loading = union(enum) { ferry: Voyage, expedition: Voyage, bridge: usize };
+
+/// A passage to load: the ferry's destination harbor or a ship's route.
+/// A survey charts the harbor first and lands everyone aboard on arrival.
+const Voyage = struct { to: usize, survey: bool = false };
 const LoadResult = enum { restored, missing, unreadable };
 
 const UI = struct {
@@ -107,7 +111,7 @@ const UI = struct {
     shipyard_tab: ShipyardTab = .ferry,
     shipyard_page: usize = 0,
     ship_id: usize = 0,
-    loading: Loading = .{ .ferry = 0 },
+    loading: Loading = .{ .ferry = .{ .to = 0 } },
     cargo_manifest: s.Stores = .{},
     boarding: u16 = 0,
     slider_focus: ?usize = null,
@@ -292,18 +296,22 @@ const UI = struct {
         u.slider_drag = null;
         u.cargo_manifest = .{};
         u.boarding = switch (passage) {
-            .ferry => |destination| u.g.ferryLimit(destination),
-            .expedition => |index| @min(2, u.g.oceanSettlerLimit(u.ship_id, index)),
+            .ferry => |voyage| u.g.ferryBoardingLimit(voyage.to, voyage.survey),
+            .expedition => |voyage| @min(2, u.shipSettlerLimit(voyage)),
             .bridge => 0,
         };
         switch (passage) {
-            .ferry => |destination| u.cargo_manifest = u.g.ferryCampSupplies(destination, u.boarding),
-            .expedition => |index| {
-                const chart = s.ocean.routes[index].chart;
+            .ferry => |voyage| u.cargo_manifest = u.g.ferryCampSupplies(voyage.to, u.boarding, voyage.survey),
+            .expedition => |voyage| {
+                const chart = s.ocean.routes[voyage.to].chart;
                 if (u.boarding > 0 and u.g.residents(chart) == 0) u.cargo_manifest = camp_supplies;
             },
             .bridge => {},
         }
+    }
+
+    fn shipSettlerLimit(u: *const UI, voyage: Voyage) u16 {
+        return if (voyage.survey) u.g.surveySettlerLimit(u.ship_id, voyage.to) else u.g.oceanSettlerLimit(u.ship_id, voyage.to);
     }
 
     fn slider(u: *UI, id: usize, y: f32, amount: *u16, limit: u16) void {
@@ -339,9 +347,13 @@ const UI = struct {
             .expedition => 0,
         };
         const target = switch (loading) {
-            .ferry => |destination| destination,
+            .ferry => |voyage| voyage.to,
             .bridge => 1 - source,
-            .expedition => |index| s.ocean.routes[index].chart,
+            .expedition => |voyage| s.ocean.routes[voyage.to].chart,
+        };
+        const survey = switch (loading) {
+            .ferry, .expedition => |voyage| voyage.survey,
+            .bridge => false,
         };
         const hold: u32 = switch (loading) {
             .ferry => s.ferry_hold,
@@ -351,7 +363,7 @@ const UI = struct {
 
         a.rect(194, 76, 812, 608, paper);
         a.rect(194, 76, 812, 6, gold);
-        label(if (loading == .bridge) "Bridge stores" else "Load and board", 226, 102, 35, ink, true);
+        label(if (loading == .bridge) "Bridge stores" else if (survey) "Survey and settle" else "Load and board", 226, 102, 35, ink, true);
         num("{s} to {s}   /   {s}", .{
             s.chart_names[source], s.chart_names[target],
             switch (loading) {
@@ -362,8 +374,8 @@ const UI = struct {
         }, 226, 153, 21, ink);
         if (loading != .bridge) {
             const limit = switch (loading) {
-                .ferry => u.g.ferryLimit(target),
-                .expedition => |index| u.g.oceanSettlerLimit(u.ship_id, index),
+                .ferry => |voyage| u.g.ferryBoardingLimit(target, voyage.survey),
+                .expedition => |voyage| u.shipSettlerLimit(voyage),
                 .bridge => unreachable,
             };
             label("Settlers aboard", 226, 192, 20, ink, false);
@@ -371,12 +383,12 @@ const UI = struct {
         }
         const rations: s.Stores = switch (loading) {
             .ferry => u.g.ferryProvisions(source, target, u.boarding),
-            .expedition => |index| u.g.oceanRations(u.ship_id, index, u.boarding),
+            .expedition => |voyage| u.g.oceanRations(u.ship_id, voyage.to, u.boarding),
             .bridge => .{},
         };
         const limits = switch (loading) {
             .ferry => u.g.ferryCargoLimit(target, u.boarding),
-            .expedition => |index| u.g.oceanCargoLimit(u.ship_id, index, u.boarding),
+            .expedition => |voyage| u.g.oceanCargoLimit(u.ship_id, voyage.to, u.boarding),
             .bridge => u.g.bridgeCargoLimit(source),
         };
         const room = hold -| rations.units();
@@ -390,6 +402,10 @@ const UI = struct {
         a.rect(226, 283, 747, 1, 0xcac9b4);
         if (loading == .bridge) {
             label("Choose supplies to carry across the bridge.", 226, 225, 18, muted, false);
+        } else if (survey and loading == .expedition) {
+            num("Survey rations   {d} each   /   settlers and supplies land once {s} is charted", .{ rations.grain, s.chart_names[target] }, 226, 226, 17, muted);
+        } else if (survey) {
+            num("Voyage rations   {d} grain or venison   /   20 coins   /   settlers land once {s} is charted", .{ rations.units(), s.chart_names[target] }, 226, 226, 17, muted);
         } else if (loading == .expedition) {
             num("Voyage rations   {d} each of grain, venison, fruit, and water", .{rations.grain}, 226, 226, 17, muted);
         } else {
@@ -415,11 +431,18 @@ const UI = struct {
             u.modal_note = null;
             return;
         }
-        const caption = if (loading == .bridge) "Transfer stores" else "Launch voyage";
+        const caption = if (loading == .bridge) "Transfer stores" else if (survey) "Launch survey" else "Launch voyage";
         if (button(caption, 808, 623, 165, 37)) {
+            const manifest: gameplay.Manifest = .{ .settlers = u.boarding, .cargo = u.cargo_manifest };
             const failure = switch (loading) {
-                .ferry => u.dispatch(.{ .send_ferry = .{ .destination = target, .manifest = .{ .settlers = u.boarding, .cargo = u.cargo_manifest } } }).problem(),
-                .expedition => |index| u.dispatch(.{ .send_expedition = .{ .ship = u.ship_id, .route = index, .manifest = .{ .settlers = u.boarding, .cargo = u.cargo_manifest } } }).problem(),
+                .ferry => |voyage| u.dispatch(if (voyage.survey)
+                    .{ .survey_harbor = .{ .destination = target, .manifest = manifest } }
+                else
+                    .{ .send_ferry = .{ .destination = target, .manifest = manifest } }).problem(),
+                .expedition => |voyage| u.dispatch(if (voyage.survey)
+                    .{ .survey_island = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }
+                else
+                    .{ .send_expedition = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }).problem(),
                 .bridge => u.dispatch(.{ .transfer_stores = .{ .source = source, .cargo = u.cargo_manifest } }).problem(),
             };
             if (failure) |problem| {
@@ -430,12 +453,14 @@ const UI = struct {
             u.closeModal();
             switch (loading) {
                 .ferry => u.view = .{},
-                .expedition => |index| u.view.showExpedition(index),
+                .expedition => |voyage| u.view.showExpedition(voyage.to),
                 .bridge => {},
             }
             u.playCue(if (loading == .bridge) .trade else .sail);
             if (loading == .bridge) {
                 u.setMessage("Supplies crossed the bridge to {s}.", .{s.chart_names[target]});
+            } else if (survey) {
+                u.setMessage("The {s} is sailing to survey {s}.", .{ if (loading == .ferry) "ferry" else "survey ship", s.chart_names[target] });
             } else {
                 u.setMessage("The {s} has set sail for {s}.", .{ if (loading == .ferry) "ferry" else "expedition ship", s.chart_names[target] });
             }
@@ -516,21 +541,18 @@ const UI = struct {
                     return;
                 }
                 if (button("Load and board", 798, y, 192, 34)) {
-                    u.openManifest(.{ .ferry = target });
+                    u.openManifest(.{ .ferry = .{ .to = target } });
                     return;
                 }
             } else {
                 num("{d:.1} s   /   not yet charted", .{leg}, 371, y + 7, 15, muted);
                 if (button("Survey   /   20 coins", 798, y, 192, 34)) {
-                    if (u.dispatch(.{ .survey_harbor = target }).problem()) |reason| {
+                    if (u.g.ferrySurveyProblem(target)) |reason| {
                         u.playCue(.denied);
                         u.modal_note = reason;
                         return;
                     }
-                    u.view = .{};
-                    u.playCue(.sail);
-                    u.setMessage("The ferry is sailing to survey {s}.", .{s.chart_names[target]});
-                    u.closeModal();
+                    u.openManifest(.{ .ferry = .{ .to = target, .survey = true } });
                     return;
                 }
             }
@@ -644,7 +666,7 @@ const UI = struct {
                 if (at_java and button("Load and board", 822, y + 15, 168, 34)) {
                     if (u.g.berthsUsed(route.chart) >= s.dock_capacity) {
                         u.modal_note = "The destination dock has no free berth.";
-                    } else u.openManifest(.{ .expedition = index });
+                    } else u.openManifest(.{ .expedition = .{ .to = index } });
                     return;
                 }
                 if (button("View island", 683, y + 15, 120, 34)) {
@@ -662,16 +684,11 @@ const UI = struct {
                         route.ship.name(), s.expeditionRations(route) * 4,
                     }, 211, y + 36, 16, muted);
                 }
-                if (at_java and ship.canSail(route) and button("Launch survey", 822, y + 15, 168, 34)) {
-                    if (u.dispatch(.{ .survey_island = .{ .ship = u.ship_id, .route = index } }).problem()) |failure| {
+                if (at_java and ship.canSail(route) and button("Survey and settle", 822, y + 15, 168, 34)) {
+                    if (u.g.surveyProblem(u.ship_id, index)) |failure| {
                         u.playCue(.denied);
                         u.modal_note = failure;
-                    } else {
-                        u.view.showExpedition(index);
-                        u.playCue(.sail);
-                        u.setMessage("The survey has set sail for {s}.", .{route.name()});
-                        u.closeModal();
-                    }
+                    } else u.openManifest(.{ .expedition = .{ .to = index, .survey = true } });
                     return;
                 }
             }
@@ -818,7 +835,11 @@ const UI = struct {
         switch (arrival) {
             .ferry => |event| {
                 const port = s.chart_names[event.island];
-                if (event.survey) {
+                if (event.survey and event.settlers > 0) {
+                    u.playCue(.foghorn);
+                    u.store_chart = event.island;
+                    u.setMessage("The ferry charted {s} and landed {d} settlers to found a camp.", .{ port, event.settlers });
+                } else if (event.survey) {
                     u.playCue(.foghorn);
                     u.setMessage("The ferry opened the dock at {s}. Use Shipyard to send it on.", .{port});
                 } else if (event.unlocked_shipyard) {
@@ -836,7 +857,10 @@ const UI = struct {
             .expedition => |event| switch (event.event) {
                 .charted => {
                     u.playCue(.foghorn);
-                    u.setMessage("{s} is charted. Expedition ship #{d} is moored there.", .{ s.chart_names[event.island], event.ship + 1 });
+                    if (event.settlers > 0) {
+                        u.store_chart = event.island;
+                        u.setMessage("{s} is charted and {d} settlers landed. Expedition ship #{d} is moored there.", .{ s.chart_names[event.island], event.settlers, event.ship + 1 });
+                    } else u.setMessage("{s} is charted. Expedition ship #{d} is moored there.", .{ s.chart_names[event.island], event.ship + 1 });
                 },
                 .delivered => {
                     u.playCue(.foghorn);

@@ -223,25 +223,30 @@ pub const Player = struct {
         return wants;
     }
 
+    /// Timber a survey must carry before the player lands settlers with it:
+    /// enough for Bali's first well and farm.
+    const settle_timber: u16 = 8;
+
     /// Moves the ferry, settlers and supplies toward the opening charter.
+    /// The survey of Bali already carries its first settlers.
     fn ferry(p: *Player) void {
         const g = &p.game;
         const moored = g.mooredChart() orelse return;
-        if (!g.islandOpen(bali)) {
-            if (moored == java and g.coins >= 20 and g.people >= 4 and p.act(.{ .survey_harbor = bali }))
-                p.log.note(g, "ferry surveys Bali", .{});
-            return;
-        }
-        if (g.bridge) return p.overland();
-        if (moored == bali) {
-            if (p.act(.{ .sail_ferry = java })) p.log.note(g, "ferry returns to Java", .{});
-            return;
+        const survey = !g.islandOpen(bali);
+        if (survey) {
+            if (moored != java or g.coins < 20 or g.people < 4) return;
+        } else {
+            if (g.bridge) return p.overland();
+            if (moored == bali) {
+                if (p.act(.{ .sail_ferry = java })) p.log.note(g, "ferry returns to Java", .{});
+                return;
+            }
         }
         // Keep two settlers working Java; move the rest until Bali has its bridge crew.
         const spare = g.residents(java) -| 2;
         const crew = domain.bridge_crew -| g.residents(bali);
-        const settlers = @min(spare, crew, g.ferryLimit(bali));
-        const camp = if (settlers > 0) g.ferryCampSupplies(bali, settlers) else Stores{};
+        const settlers = @min(spare, crew, g.ferryBoardingLimit(bali, survey));
+        const camp = if (settlers > 0) g.ferryCampSupplies(bali, settlers, survey) else Stores{};
         var load = camp;
         const rations = g.ferryProvisions(java, bali, settlers);
         var room = domain.ferry_hold -| (load.units() + rations.units());
@@ -254,9 +259,17 @@ pub const Player = struct {
             @field(load, name) += amount;
             room -= amount;
         }
+        // Settle Bali on the survey only when Java can also send the timber to build there.
+        const settle = !survey or load.timber >= settle_timber;
+        const manifest: gameplay.Manifest = if (settle) .{ .settlers = settlers, .cargo = load } else .{ .settlers = 0, .cargo = .{} };
+        if (survey) {
+            if (p.act(.{ .survey_harbor = .{ .destination = bali, .manifest = manifest } }))
+                p.log.note(g, "ferry surveys Bali with {d} settlers, cargo {any}", .{ manifest.settlers, manifest.cargo });
+            return;
+        }
         if (settlers == 0 and load.units() < 8) return;
         p.log.note(g, "ferry to Bali: {d} settlers, cargo {any}", .{ settlers, load });
-        std.debug.assert(p.act(.{ .send_ferry = .{ .destination = bali, .manifest = .{ .settlers = settlers, .cargo = load } } }));
+        std.debug.assert(p.act(.{ .send_ferry = .{ .destination = bali, .manifest = manifest } }));
     }
 
     /// What Java holds back for its own settlers and buildings.

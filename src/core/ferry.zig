@@ -472,7 +472,8 @@ pub const Ferry = struct {
     destination: usize = 0,
     /// Game seconds since it left `origin`.
     sailing_time: f32 = 0,
-    /// The current passage surveys `destination` instead of carrying a load.
+    /// The current passage surveys `destination`. Any settlers and cargo
+    /// aboard land once the harbor is charted.
     surveying: bool = false,
     /// Bali has been surveyed and its port opened. Other islands are
     /// recorded on the fleet's chart.
@@ -507,12 +508,9 @@ pub fn advanceShip(g: *Game, seconds: f32) void {
     g.ferry.sailing_time += seconds;
     if (g.ferry.sailing_time < g.ferry.legSeconds()) return;
     const port = g.ferry.destination;
-    if (g.ferry.surveying) {
-        g.chartHarbor(port);
-    } else {
-        if (port == 1 and g.ferry.passengers > 0) g.charter.ferried_to_bali = true;
-        g.land(port, g.ferry.passengers, g.ferry.cargo);
-    }
+    if (g.ferry.surveying) g.chartHarbor(port);
+    if (port == 1 and g.ferry.passengers > 0) g.charter.ferried_to_bali = true;
+    g.land(port, g.ferry.passengers, g.ferry.cargo);
     g.ferry = .{ .origin = port, .destination = port, .surveyed = g.ferry.surveyed };
 }
 
@@ -537,6 +535,18 @@ pub fn ferryLimit(g: *const Game, destination: usize) u16 {
     return @min(ferry_capacity, g.residents(source), g.freeLandingSpace(destination));
 }
 
+/// Settlers a survey can carry to found a camp once the harbor is charted.
+pub fn ferrySurveyLimit(g: *const Game, target: usize) u16 {
+    if (g.ferrySurveyProblem(target) != null) return 0;
+    const source = g.mooredChart().?;
+    return @min(ferry_capacity, g.residents(source), camp_capacity -| g.reservedBeds(target));
+}
+
+/// Settlers the ferry can carry on a passage, or on a survey when `survey` is set.
+pub fn ferryBoardingLimit(g: *const Game, destination: usize, survey: bool) u16 {
+    return if (survey) g.ferrySurveyLimit(destination) else g.ferryLimit(destination);
+}
+
 pub fn ferryProvisions(g: *const Game, source: usize, destination: usize, settlers: u16) Stores {
     const amount = ferryRations(source, destination, settlers);
     const meat = @min(g.stores[source].venison, amount);
@@ -545,8 +555,8 @@ pub fn ferryProvisions(g: *const Game, source: usize, destination: usize, settle
 
 /// Supplies for settlers founding a camp: three days of food and water,
 /// as far as the departure harbor can spare them.
-pub fn ferryCampSupplies(g: *const Game, destination: usize, settlers: u16) Stores {
-    if (settlers == 0 or settlers > g.ferryLimit(destination) or g.residents(destination) != 0) return .{};
+pub fn ferryCampSupplies(g: *const Game, destination: usize, settlers: u16, survey: bool) Stores {
+    if (settlers == 0 or settlers > g.ferryBoardingLimit(destination, survey) or g.residents(destination) != 0) return .{};
     const source = g.mooredChart().?;
     const rations = g.ferryProvisions(source, destination, settlers);
     const limits = g.ferryCargoLimit(destination, settlers);
@@ -564,18 +574,30 @@ pub fn ferryCampSupplies(g: *const Game, destination: usize, settlers: u16) Stor
 /// Ferry settlers with the camp supplies they need.
 pub fn ferrySettlers(g: *Game, destination: usize, requested: u16) ?[:0]const u8 {
     if (requested == 0) return "Choose settlers to ferry.";
-    return g.sendFerry(destination, requested, g.ferryCampSupplies(destination, requested));
+    return g.sendFerry(destination, requested, g.ferryCampSupplies(destination, requested, false));
 }
 
 pub fn sendFerry(g: *Game, destination: usize, settlers: u16, load: Stores) ?[:0]const u8 {
     if (g.ferryRouteProblem(destination)) |problem| return problem;
-    const source = g.mooredChart().?;
     if (settlers > g.ferryLimit(destination)) return "Choose a passenger count that fits the available landing space.";
     if (settlers == 0 and load.empty()) return "Choose settlers or supplies to send.";
+    return board(g, destination, settlers, load);
+}
+
+/// Check the hold and stock for a manifest, then take it aboard and sail.
+fn boardingProblem(g: *const Game, destination: usize, settlers: u16, load: Stores) ?[:0]const u8 {
+    const source = g.mooredChart().?;
     const rations = g.ferryProvisions(source, destination, settlers);
     if (load.units() + rations.units() > ferry_hold) return "Cargo and provisions exceed the ferry's hold.";
     if (!g.stores[source].includes(rations)) return "The ferry needs more grain or venison for the journey.";
     if (!g.ferryCargoLimit(destination, settlers).includes(load)) return "There is not enough stock or room for this cargo.";
+    return null;
+}
+
+fn board(g: *Game, destination: usize, settlers: u16, load: Stores) ?[:0]const u8 {
+    if (boardingProblem(g, destination, settlers, load)) |problem| return problem;
+    const source = g.mooredChart().?;
+    const rations = g.ferryProvisions(source, destination, settlers);
     g.stores[source].take(rations);
     g.stores[source].take(load);
     if (source != 0) g.island_people[source - 1] -= settlers;
@@ -615,13 +637,15 @@ pub fn ferrySurveyProblem(g: *const Game, target: usize) ?[:0]const u8 {
     return null;
 }
 
-/// Send the ferry's crew to chart a harbor. The port opens when it arrives.
-pub fn surveyByFerry(g: *Game, target: usize) ?[:0]const u8 {
+/// Send the ferry's crew to chart a harbor. The port opens when it arrives,
+/// and any settlers and supplies aboard go ashore to found a camp.
+pub fn surveyByFerry(g: *Game, target: usize, settlers: u16, load: Stores) ?[:0]const u8 {
     if (g.ferrySurveyProblem(target)) |problem| return problem;
+    if (settlers > g.ferrySurveyLimit(target)) return "A new camp has room for four settlers.";
+    if (boardingProblem(g, target, settlers, load)) |problem| return problem;
     g.coins -= survey_cost;
     g.ferry.surveying = true;
-    depart(g, target);
-    return null;
+    return board(g, target, settlers, load);
 }
 
 test "every baked lane's course stays at sea both ways, clear of every island's tiles and coastline" {
@@ -695,14 +719,14 @@ test "the Bali Strait sets the scale and Lombok is in range of Bali" {
 test "the ferry surveys Lombok from Bali and carries settlers and stores there" {
     var g = Game.init();
     g.coins = 2 * survey_cost;
-    try std.testing.expect(g.surveyByFerry(2) != null);
-    try std.testing.expect(g.surveyByFerry(1) == null);
+    try std.testing.expect(g.surveyByFerry(2, 0, .{}) != null);
+    try std.testing.expect(g.surveyByFerry(1, 0, .{}) == null);
     g.advanceShip(crossing_seconds);
     try std.testing.expectEqual(@as(?usize, 1), g.mooredChart());
     try std.testing.expectEqualStrings("Complete the island charter to explore farther.", g.ferrySurveyProblem(2).?);
     g.charter = .{ .ferried_to_bali = true, .won = true, .housed_eight = true };
     g.bridge = true;
-    try std.testing.expect(g.surveyByFerry(2) == null);
+    try std.testing.expect(g.surveyByFerry(2, 0, .{}) == null);
     g.advanceShip(legSeconds(1, 2));
     try std.testing.expect(g.islandOpen(2));
     try std.testing.expect(g.fleet.charted[ocean.routeTo(2).?]);
@@ -723,6 +747,29 @@ test "the ferry surveys Lombok from Bali and carries settlers and stores there" 
     try std.testing.expectEqual(@as(u16, 2), g.residents(2));
     try std.testing.expectEqualDeep(cargo, g.stores[2]);
     try std.testing.expect(g.ferry.cargo.empty() and g.ferry.passengers == 0);
+}
+
+test "a ferry survey lands its settlers and camp supplies when it charts the harbor" {
+    var g = Game.init();
+    g.people = 6;
+    g.coins = survey_cost;
+    try std.testing.expectEqual(camp_capacity, g.ferrySurveyLimit(1));
+    try std.testing.expectEqualStrings("A new camp has room for four settlers.", g.surveyByFerry(1, camp_capacity + 1, .{}).?);
+    const supplies = g.ferryCampSupplies(1, 3, true);
+    try std.testing.expect(!supplies.empty());
+    // A refused survey costs nothing.
+    try std.testing.expect(g.surveyByFerry(1, 3, .{ .timber = 200 }) != null);
+    try std.testing.expectEqual(survey_cost, g.coins);
+    try std.testing.expect(g.surveyByFerry(1, 3, supplies) == null);
+    try std.testing.expectEqual(@as(u16, 0), g.coins);
+    try std.testing.expectEqual(@as(u16, 3), g.residents(0));
+    try std.testing.expect(g.beingSurveyed(1) and !g.islandOpen(1));
+    g.advanceShip(crossing_seconds);
+    try std.testing.expect(g.islandOpen(1));
+    try std.testing.expect(g.charter.ferried_to_bali);
+    try std.testing.expectEqual(@as(u16, 3), g.residents(1));
+    try std.testing.expectEqualDeep(supplies, g.stores[1]);
+    try std.testing.expectEqual(@as(?usize, 1), g.mooredChart());
 }
 
 test "the ferry cannot sail out of range or to an unsurveyed harbor" {

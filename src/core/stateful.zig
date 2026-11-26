@@ -76,14 +76,21 @@ pub fn randomCommand(random: std.Random) Command {
         2 => .build_bridge,
         3 => .{ .cross_bridge = random.uintLessThan(usize, 3) },
         4 => .{ .transfer_stores = .{ .source = random.uintLessThan(usize, 3), .cargo = uniform(random.intRangeAtMost(u16, 0, 6)) } },
-        5 => .{ .survey_harbor = ferryHarbor(random) },
+        5 => .{ .survey_harbor = .{ .destination = ferryHarbor(random), .manifest = .{
+            .settlers = random.intRangeAtMost(u16, 0, 5),
+            .cargo = uniform(random.intRangeAtMost(u16, 0, 5)),
+        } } },
         6 => .{ .send_ferry = .{ .destination = ferryHarbor(random), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 5),
             .cargo = uniform(random.intRangeAtMost(u16, 0, 5)),
         } } },
         7 => .{ .sail_ferry = ferryHarbor(random) },
         8 => .{ .build_ship = .{ .island = random.uintLessThan(usize, 2), .hull = if (random.boolean()) .brig else .barque } },
-        9 => .{ .survey_island = .{ .ship = random.uintLessThan(usize, ships), .route = random.uintLessThan(usize, routes) } },
+        9 => .{ .survey_island = .{
+            .ship = random.uintLessThan(usize, ships),
+            .route = random.uintLessThan(usize, routes),
+            .manifest = .{ .settlers = random.intRangeAtMost(u16, 0, 5), .cargo = uniform(random.intRangeAtMost(u16, 0, 4)) },
+        } },
         10 => .{ .send_expedition = .{
             .ship = random.uintLessThan(usize, ships),
             .route = random.uintLessThan(usize, routes),
@@ -193,8 +200,8 @@ pub fn check(before: *const domain.Game, after: *const domain.Game, command: Com
             return .init("the ferry is part way across", "{d} of {d} seconds", .{ ferry.sailing_time, ferry.legSeconds() });
         if (ferry.surveying == after.islandOpen(ferry.destination))
             return .init("the ferry surveys only uncharted harbors and sails only to charted ones", "destination {d}", .{ferry.destination});
-        if (ferry.surveying and (ferry.passengers != 0 or !ferry.cargo.empty()))
-            return .init("a survey carries no load", "{d} passengers", .{ferry.passengers});
+        if (ferry.surveying and ferry.passengers > domain.camp_capacity)
+            return .init("a survey carries no more settlers than a new camp holds", "{d} passengers", .{ferry.passengers});
     } else if (ferry.sailing_time != 0 or ferry.surveying or ferry.passengers != 0 or !ferry.cargo.empty())
         return .init("a moored ferry is unloaded", "at {d}", .{ferry.origin});
     for (after.vessels(), 0..) |vessel, id| {
@@ -202,6 +209,8 @@ pub fn check(before: *const domain.Game, after: *const domain.Game, command: Com
             return .init("ship cargo fits the hold", "ship {d}: {d} units", .{ id, vessel.cargo.units() });
         if (vessel.passengers > vessel.ship.passengerCapacity())
             return .init("ship passengers fit the ship", "ship {d}: {d} passengers", .{ id, vessel.passengers });
+        if (vessel.surveying and (vessel.phase != .outbound or after.islandOpen(vessel.chart) or vessel.passengers > domain.camp_capacity))
+            return .init("ships survey only uncharted harbors, carrying at most a new camp", "ship {d} to {d}", .{ id, vessel.chart });
     }
     for (0..domain.settlement_count) |chart| {
         if (after.berthsUsed(chart) > domain.dock_capacity)

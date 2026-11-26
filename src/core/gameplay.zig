@@ -13,12 +13,14 @@ pub const Command = union(enum) {
     cross_bridge: usize,
     transfer_stores: struct { source: usize, cargo: domain.Stores },
     /// Send the ferry's crew to chart a harbor in range of its mooring.
-    survey_harbor: usize,
+    /// Settlers and cargo aboard found a camp there on arrival.
+    survey_harbor: struct { destination: usize, manifest: Manifest },
     send_ferry: struct { destination: usize, manifest: Manifest },
     /// Sail the ferry without a load to another harbor.
     sail_ferry: usize,
     build_ship: struct { island: usize, hull: domain.ocean.Ship },
-    survey_island: struct { ship: usize, route: usize },
+    /// Survey an uncharted route. Settlers and cargo aboard found a camp on arrival.
+    survey_island: struct { ship: usize, route: usize, manifest: Manifest },
     send_expedition: struct { ship: usize, route: usize, manifest: Manifest },
     return_expedition: usize,
     export_grain: usize,
@@ -103,14 +105,14 @@ pub fn apply(game: *domain.Game, command: Command) Outcome {
         .build_bridge => game.buildBridge(),
         .cross_bridge => |island| if (island <= 1) game.crossBridge(island) else "Choose Java or Bali.",
         .transfer_stores => |c| if (c.source <= 1) game.sendCargo(c.source, c.cargo) else "Choose Java or Bali.",
-        .survey_harbor => |chart| game.surveyByFerry(chart),
+        .survey_harbor => |c| game.surveyByFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .send_ferry => |c| game.sendFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .sail_ferry => |chart| game.sailFerry(chart),
         .build_ship => |c| if (c.island < domain.settlement_count)
             game.buildShip(c.island, c.hull)
         else
             "Choose an island on the chart.",
-        .survey_island => |c| game.launchExpedition(c.ship, c.route),
+        .survey_island => |c| game.launchExpedition(c.ship, c.route, c.manifest.settlers, c.manifest.cargo),
         .send_expedition => |c| game.sendExpedition(c.ship, c.route, c.manifest.settlers, c.manifest.cargo),
         .return_expedition => |id| game.returnExpedition(id),
         .export_grain => |island| if (island >= domain.settlement_count)

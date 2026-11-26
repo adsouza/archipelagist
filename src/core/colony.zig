@@ -272,6 +272,7 @@ pub const Game = struct {
     pub const surveyProblem = fleet.surveyProblem;
     pub const launchExpedition = fleet.launchExpedition;
     pub const oceanSettlerLimit = fleet.oceanSettlerLimit;
+    pub const surveySettlerLimit = fleet.surveySettlerLimit;
     pub const oceanCargoLimit = fleet.oceanCargoLimit;
     pub const sendExpedition = fleet.sendExpedition;
     pub const returnExpedition = fleet.returnExpedition;
@@ -283,6 +284,8 @@ pub const Game = struct {
     pub const mooredChart = ferry.mooredChart;
     pub const ferryRouteProblem = ferry.ferryRouteProblem;
     pub const ferryLimit = ferry.ferryLimit;
+    pub const ferrySurveyLimit = ferry.ferrySurveyLimit;
+    pub const ferryBoardingLimit = ferry.ferryBoardingLimit;
     pub const ferryProvisions = ferry.ferryProvisions;
     pub const ferryCampSupplies = ferry.ferryCampSupplies;
     pub const ferrySettlers = ferry.ferrySettlers;
@@ -502,8 +505,17 @@ pub const Game = struct {
 
     /// Where the ferry is carrying settlers and cargo, if it is under way.
     pub fn voyageDestination(g: *const Game) ?usize {
-        if (g.ferry.moored() != null or g.ferry.surveying) return null;
+        if (g.ferry.moored() != null) return null;
         return g.ferry.destination;
+    }
+
+    /// A survey is under way to this uncharted harbor.
+    pub fn beingSurveyed(g: *const Game, chart: usize) bool {
+        if (g.ferry.surveying and g.ferry.destination == chart) return true;
+        for (g.vessels()) |vessel| {
+            if (vessel.phase == .outbound and vessel.surveying and vessel.chart == chart) return true;
+        }
+        return false;
     }
 
     /// Put arriving settlers and cargo ashore.
@@ -531,7 +543,7 @@ pub const Game = struct {
     }
 
     pub fn landingCapacity(g: *const Game, chart: usize) u16 {
-        const camp = if (chart != 0 and g.islandOpen(chart)) camp_capacity else 0;
+        const camp = if (chart != 0 and (g.islandOpen(chart) or g.beingSurveyed(chart))) camp_capacity else 0;
         return @max(camp, g.housing(chart));
     }
 
@@ -804,8 +816,8 @@ test "settlement can feed settlers, trade, survey, and commission its lighthouse
         if (g.tileAt(0, cell) == .empty) try std.testing.expect(g.build(0, cell, .road) == null);
     }
     try std.testing.expect(g.sell(0));
-    try std.testing.expect(g.surveyByFerry(1) == null);
-    try std.testing.expect(g.surveyByFerry(1) != null);
+    try std.testing.expect(g.surveyByFerry(1, 0, .{}) == null);
+    try std.testing.expect(g.surveyByFerry(1, 0, .{}) != null);
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(crossing_seconds);
@@ -895,7 +907,7 @@ test "either island needs two residents and Bali keeps ferry beds free" {
     try std.testing.expect(g.build(0, .{ .x = 39, .y = 39 }, .farm) == null);
     g.people = 4;
     g.coins = 20;
-    try std.testing.expect(g.surveyByFerry(1) == null);
+    try std.testing.expect(g.surveyByFerry(1, 0, .{}) == null);
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(crossing_seconds);
@@ -932,7 +944,7 @@ test "either island needs two residents and Bali keeps ferry beds free" {
 test "islands consume and produce supplies locally" {
     var g = Game.init();
     g.coins = 20;
-    try std.testing.expect(g.surveyByFerry(1) == null);
+    try std.testing.expect(g.surveyByFerry(1, 0, .{}) == null);
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(crossing_seconds);

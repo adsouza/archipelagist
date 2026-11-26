@@ -36,7 +36,7 @@ fn rejectionCase(seed: u64) !void {
     try std.testing.expectEqual(domain.Kind.port, game.tileAt(0, home));
     try std.testing.expectEqualSlices(u8, &save.encode(game), &save.encode(rejected_state));
     try rejected(&game, .{ .export_grain = 0 });
-    try rejected(&game, .{ .survey_harbor = 2 });
+    try rejected(&game, .{ .survey_harbor = .{ .destination = 2, .manifest = .{ .settlers = 0, .cargo = .{} } } });
     try rejected(&game, .{ .advance = switch (seed % 3) {
         0 => -random.float(f32) - 1,
         1 => std.math.nan(f32),
@@ -322,14 +322,21 @@ fn randomCommand(random: std.Random, game: *const domain.Game) gameplay.Command 
         2 => .build_bridge,
         3 => .{ .cross_bridge = random.uintLessThan(usize, 3) },
         4 => .{ .transfer_stores = .{ .source = random.uintLessThan(usize, 3), .cargo = stock(random.intRangeAtMost(u16, 0, 4)) } },
-        5 => .{ .survey_harbor = random.uintLessThan(usize, 3) },
+        5 => .{ .survey_harbor = .{ .destination = random.uintLessThan(usize, 3), .manifest = .{
+            .settlers = random.intRangeAtMost(u16, 0, 5),
+            .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
+        } } },
         6 => .{ .send_ferry = .{ .destination = random.uintLessThan(usize, 3), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 4),
             .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
         } } },
         7 => .{ .sail_ferry = random.uintLessThan(usize, 3) },
         8 => .{ .build_ship = .{ .island = random.uintLessThan(usize, 2), .hull = if (random.boolean()) .brig else .barque } },
-        9 => .{ .survey_island = .{ .ship = random.uintLessThan(usize, game.fleet.count + 1), .route = random.uintLessThan(usize, domain.ocean.routes.len) } },
+        9 => .{ .survey_island = .{
+            .ship = random.uintLessThan(usize, game.fleet.count + 1),
+            .route = random.uintLessThan(usize, domain.ocean.routes.len),
+            .manifest = .{ .settlers = random.intRangeAtMost(u16, 0, 5), .cargo = stock(random.intRangeAtMost(u16, 0, 3)) },
+        } },
         10 => .{ .send_expedition = .{
             .ship = random.uintLessThan(usize, game.fleet.count + 1),
             .route = random.uintLessThan(usize, domain.ocean.routes.len),

@@ -48,6 +48,9 @@ pub const Vessel = struct {
     passengers: u16 = 0,
     cargo: Stores = .{},
     return_provisioned: bool = false,
+    /// The outbound passage charts `chart`. Any settlers and cargo aboard
+    /// land once the harbor is charted.
+    surveying: bool = false,
 
     pub fn berthChart(vessel: Vessel) usize {
         return if (vessel.phase == .homebound) 0 else vessel.chart;
@@ -124,6 +127,7 @@ pub fn oceanRations(g: *const Game, id: usize, index: usize, passengers: u16) St
     return voyageRations(ocean.routes[index], g.fleet.vessels[id].ship.crew(), passengers);
 }
 
+/// Why a ship cannot survey a route, before counting any settlers or cargo.
 pub fn surveyProblem(g: *const Game, id: usize, index: usize) ?[:0]const u8 {
     if (!g.charterComplete()) return "Complete the island charter to explore farther.";
     if (id >= g.fleet.count or index >= ocean.routes.len) return "Choose a ship and destination.";
@@ -144,14 +148,42 @@ pub fn surveyProblem(g: *const Game, id: usize, index: usize) ?[:0]const u8 {
     return null;
 }
 
-pub fn launchExpedition(g: *Game, id: usize, index: usize) ?[:0]const u8 {
+/// Settlers a survey can carry to found a camp once the harbor is charted.
+pub fn surveySettlerLimit(g: *const Game, id: usize, index: usize) u16 {
+    if (g.surveyProblem(id, index) != null) return 0;
+    const ship = g.fleet.vessels[id].ship;
+    var limit = @min(ship.passengerCapacity(), g.residents(0), colony.camp_capacity);
+    while (limit > 0 and g.oceanRations(id, index, limit).units() > ship.hold()) limit -= 1;
+    return limit;
+}
+
+/// Survey a route. Settlers and supplies aboard found a camp on arrival.
+pub fn launchExpedition(g: *Game, id: usize, index: usize, passengers: u16, load: Stores) ?[:0]const u8 {
     if (g.surveyProblem(id, index)) |problem| return problem;
-    g.stores[0].take(g.oceanRations(id, index, 0));
+    if (passengers > g.surveySettlerLimit(id, index)) return "A new camp has room for four settlers.";
+    if (loadProblem(g, id, index, passengers, load)) |problem| return problem;
+    embark(g, id, index, passengers, load);
+    g.fleet.vessels[id].surveying = true;
+    return null;
+}
+
+fn loadProblem(g: *const Game, id: usize, index: usize, passengers: u16, load: Stores) ?[:0]const u8 {
+    const rations = g.oceanRations(id, index, passengers);
+    if (rations.units() + load.units() > g.fleet.vessels[id].ship.hold()) return "Cargo and provisions exceed the ship's hold.";
+    if (!g.stores[0].includes(rations)) return "Stock more grain, venison, fruit, and water for the passage.";
+    if (!g.oceanCargoLimit(id, index, passengers).includes(load)) return "There is not enough stock or room for this cargo.";
+    return null;
+}
+
+fn embark(g: *Game, id: usize, index: usize, passengers: u16, load: Stores) void {
+    g.stores[0].take(g.oceanRations(id, index, passengers));
+    g.stores[0].take(load);
     const vessel = &g.fleet.vessels[id];
     vessel.chart = ocean.routes[index].chart;
     vessel.phase = .outbound;
     vessel.return_provisioned = true;
-    return null;
+    vessel.passengers = passengers;
+    vessel.cargo = load;
 }
 
 pub fn oceanSettlerLimit(g: *const Game, id: usize, index: usize) u16 {
@@ -180,17 +212,8 @@ pub fn sendExpedition(g: *Game, id: usize, index: usize, passengers: u16, load: 
     if (g.residents(0) < ship.crew() or g.workforce(0) == 0) return "Java needs enough healthy settlers to crew this ship.";
     if (passengers > g.oceanSettlerLimit(id, index)) return "Choose a passenger count that fits this crossing.";
     if (passengers == 0 and load.empty()) return "Choose settlers or supplies to send.";
-    const rations = g.oceanRations(id, index, passengers);
-    if (rations.units() + load.units() > ship.hold()) return "Cargo and provisions exceed the ship's hold.";
-    if (!g.stores[0].includes(rations)) return "Stock more grain, venison, fruit, and water for the passage.";
-    if (!g.oceanCargoLimit(id, index, passengers).includes(load)) return "There is not enough stock or room for this cargo.";
-    g.stores[0].take(rations);
-    g.stores[0].take(load);
-    vessel.chart = route.chart;
-    vessel.phase = .outbound;
-    vessel.return_provisioned = true;
-    vessel.passengers = passengers;
-    vessel.cargo = load;
+    if (loadProblem(g, id, index, passengers, load)) |problem| return problem;
+    embark(g, id, index, passengers, load);
     return null;
 }
 
@@ -230,12 +253,11 @@ pub fn advanceExpedition(g: *Game, id: usize, seconds: f32) ExpeditionEvent {
         return .returned;
     }
     const chart = vessel.chart;
-    if (vessel.carryingLoad()) {
-        g.land(chart, vessel.passengers, vessel.cargo);
-        vessel.passengers = 0;
-        vessel.cargo = .{};
-        return .delivered;
-    }
-    g.chartHarbor(chart);
-    return .charted;
+    const surveyed = vessel.surveying;
+    if (surveyed) g.chartHarbor(chart);
+    g.land(chart, vessel.passengers, vessel.cargo);
+    vessel.passengers = 0;
+    vessel.cargo = .{};
+    vessel.surveying = false;
+    return if (surveyed) .charted else .delivered;
 }
