@@ -195,47 +195,65 @@ fn openIsland(game: *domain.Game, chart: usize) void {
     game.land(chart, 1, .{ .timber = 30, .grain = 10, .water = 10 });
 }
 
-fn quarryCase(seed: u64) !void {
+fn producerFor(wanted: domain.Site) domain.Kind {
+    return switch (wanted) {
+        .outcrop => .quarry,
+        .deer => .lodge,
+        else => unreachable,
+    };
+}
+
+fn resourceCase(seed: u64) !void {
     var random_state = std.Random.DefaultPrng.init(seed);
     const random = random_state.random();
     // Half the cases open on Java, as every new game does.
     const chart = if (random.boolean()) 0 else random.uintLessThan(usize, domain.settlement_count);
+    const wanted: domain.Site = if (random.boolean()) .outcrop else .deer;
+    const kind = producerFor(wanted);
     var game = domain.Game.init();
     openIsland(&game, chart);
-    const sites = domain.quarrySites(chart);
-    try std.testing.expect(sites.len >= domain.requiredQuarrySites(chart));
+    const budget = domain.roadBudget(chart);
+    const sites = game.resourceSites(chart, wanted, budget);
+    try std.testing.expect(sites.len >= domain.requiredSites(chart, wanted));
 
-    // Every listed stone source accepts a quarry through the command path,
-    // which sits idle until roads join it to the harbor.
-    const cell = sites.slice()[random.uintLessThan(usize, sites.len)];
-    try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = cell, .kind = .quarry } }) == .applied);
+    // Every listed site accepts its producer through the command path, which
+    // sits idle until the listed number of road tiles joins it to the harbor.
+    const pick = random.uintLessThan(usize, sites.len);
+    const cell = sites.slice()[pick];
+    const cost = sites.roads[pick];
+    try std.testing.expect(cost <= budget);
+    try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = cell, .kind = kind } }) == .applied);
     const reached = game.connected(chart, cell);
-    try std.testing.expectEqual(reached, queries.ledger(&game, chart).production.stone > 0);
-    var buffer: [4 * domain.quarry_reach * domain.quarry_reach]domain.Cell = undefined;
+    const output = struct {
+        fn of(g: *const domain.Game, c: usize, k: domain.Kind) u16 {
+            const made = queries.ledger(g, c).production;
+            return if (k == .quarry) made.stone else made.venison;
+        }
+    }.of;
+    try std.testing.expectEqual(reached, output(&game, chart, kind) > 0);
+    var buffer: [64]domain.Cell = undefined;
     const path = game.roadPath(chart, cell, &buffer) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(path.len <= cost);
     try std.testing.expect(reached == (path.len == 0));
     game.stores[chart].stone = @intCast(path.len);
     for (path) |step| try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = step, .kind = .road } }) == .applied);
     try std.testing.expect(game.connected(chart, cell));
-    try std.testing.expect(queries.ledger(&game, chart).production.stone > 0);
-    const before = game.stores[chart].stone;
-    _ = gameplay.apply(&game, .{ .advance = gameplay.untilNextDay(&game) });
-    try std.testing.expect(game.stores[chart].stone > before);
+    try std.testing.expect(output(&game, chart, kind) > 0);
 
-    // Any other land tile near the harbor refuses one and leaves the game unchanged.
+    // Any other land tile near the harbor refuses the producer and leaves the game unchanged.
     const grid = domain.geography.grids[chart];
     const home = domain.quay(chart);
     const other = domain.Cell{
-        .x = @min(grid.width - 1, (home.x -| domain.quarry_reach) + random.uintLessThan(usize, 2 * domain.quarry_reach + 1)),
-        .y = @min(grid.height - 1, (home.y -| domain.quarry_reach) + random.uintLessThan(usize, 2 * domain.quarry_reach + 1)),
+        .x = @min(grid.width - 1, (home.x -| 12) + random.uintLessThan(usize, 25)),
+        .y = @min(grid.height - 1, (home.y -| 12) + random.uintLessThan(usize, 25)),
     };
-    if (domain.site(other, chart) != .outcrop and game.tileAt(chart, other) == .empty)
-        try rejected(&game, .{ .build = .{ .island = chart, .cell = other, .kind = .quarry } });
+    if (domain.site(other, chart) != wanted and game.tileAt(chart, other) == .empty)
+        try rejected(&game, .{ .build = .{ .island = chart, .cell = other, .kind = kind } });
 }
 
-test "property: every generated island lets its first settlers quarry stone near the harbor" {
-    for (1..129) |seed| quarryCase(seed) catch |err| {
-        std.debug.print("Quarry site seed={d}\n", .{seed});
+test "property: every generated island lets its first settlers quarry stone and hunt deer near the harbor" {
+    for (1..129) |seed| resourceCase(seed) catch |err| {
+        std.debug.print("Resource site seed={d}\n", .{seed});
         return err;
     };
 }

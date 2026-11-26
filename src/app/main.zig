@@ -1167,7 +1167,7 @@ fn run(process: std.process.Init, store: save_store.Store, trace: ?*diagnostics.
     }
     if (capture == null) {
         const launch = u.load(true);
-        if (trace) |active| active.note("session", "launch", .{ .status = launch, .day = u.g.day, .home_quarry_sites = s.quarrySites(0).len });
+        if (trace) |active| active.note("session", "launch", .{ .status = launch, .day = u.g.day, .home_quarry_sites = u.g.resourceSites(0, .outcrop, s.opening_road_budget).len, .home_deer_sites = u.g.resourceSites(0, .deer, s.opening_road_budget).len });
         if (!u.preserve_unreadable_save) u.saveNow(false) catch {
             u.msg = "Could not write the harbor ledger.";
         };

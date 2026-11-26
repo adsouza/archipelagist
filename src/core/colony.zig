@@ -114,66 +114,53 @@ pub fn wellSite(p: Cell, chart: usize) bool {
     return depth(p, chart) >= 0.20 and !forest(p, chart) and site(p, chart) == .plain;
 }
 
-/// How far, in tiles, from its harbor an island's quarry sites must lie to
-/// count toward its opening stone supply.
-pub const quarry_reach: usize = 12;
-/// Every settlement needs this many quarry sites within reach of its harbor.
-pub const min_quarry_sites: usize = 2;
-/// The starting island carries the whole early game, so it needs more.
-pub const opening_quarry_sites: usize = 4;
+/// The most road tiles a new colony should have to lay to reach a resource
+/// site from its harbor. Java's start must be cheaper still, because the
+/// opening stone pays for every road until a quarry is running.
+pub const site_road_budget: u16 = 6;
+pub const opening_road_budget: u16 = 3;
 
-/// The rocky outcrops within `quarry_reach` of a harbor that settlers can reach
-/// over land by building roads from the quay.
-pub const QuarrySites = struct {
-    const window = 2 * quarry_reach + 1;
-    cells: [window * window]Cell = undefined,
+/// The road budget that counts toward an island's resource supply.
+pub fn roadBudget(chart: usize) u16 {
+    return if (chart == 0) opening_road_budget else site_road_budget;
+}
+
+/// How many sites of a kind an island must offer within its road budget.
+/// The starting island carries the whole early game, so it needs more.
+pub fn requiredSites(chart: usize, wanted: Site) usize {
+    if (chart != 0) return if (wanted == .plain) 0 else 2;
+    return switch (wanted) {
+        .plain => 0,
+        .outcrop => 4,
+        .deer => 3,
+        .fruit => 2,
+    };
+}
+
+/// Resource sites ranked by the road tiles needed to join them to the harbor.
+pub const ResourceSites = struct {
+    pub const capacity = 32;
+    cells: [capacity]Cell = undefined,
+    roads: [capacity]u16 = undefined,
     len: usize = 0,
 
-    pub fn slice(sites: *const QuarrySites) []const Cell {
+    pub fn slice(sites: *const ResourceSites) []const Cell {
         return sites.cells[0..sites.len];
     }
-};
 
-/// Finds the quarry sites near a harbor from the baked terrain alone. Roads
-/// join along shared edges, so the search walks land four ways from the quay.
-pub fn quarrySites(chart: usize) QuarrySites {
-    const grid = geography.grids[chart];
-    const home = grid.quay;
-    const Window = QuarrySites.window;
-    const left = home.x -| quarry_reach;
-    const top = home.y -| quarry_reach;
-    var seen: std.StaticBitSet(Window * Window) = .empty;
-    var queue: [Window * Window]Cell = undefined;
-    var head: usize = 0;
-    var tail: usize = 0;
-    var sites = QuarrySites{};
-    if (depth(home, chart) < 0) return sites;
-    queue[tail] = home;
-    tail += 1;
-    seen.set((home.y - top) * Window + (home.x - left));
-    while (head < tail) : (head += 1) {
-        const cell = queue[head];
-        if (site(cell, chart) == .outcrop) {
-            sites.cells[sites.len] = cell;
-            sites.len += 1;
+    /// Keeps the cheapest `capacity` sites, cheapest first.
+    fn offer(sites: *ResourceSites, cell: Cell, cost: u16) void {
+        if (sites.len == capacity and sites.roads[capacity - 1] <= cost) return;
+        var at = @min(sites.len, capacity - 1);
+        while (at > 0 and sites.roads[at - 1] > cost) : (at -= 1) {
+            sites.cells[at] = sites.cells[at - 1];
+            sites.roads[at] = sites.roads[at - 1];
         }
-        for (roads.directions) |direction| {
-            const next = roads.neighbor(cell, direction, grid) orelse continue;
-            if (next.x < left or next.y < top or next.x - left >= Window or next.y - top >= Window) continue;
-            const slot = (next.y - top) * Window + (next.x - left);
-            if (seen.isSet(slot) or depth(next, chart) < 0) continue;
-            seen.set(slot);
-            queue[tail] = next;
-            tail += 1;
-        }
+        sites.cells[at] = cell;
+        sites.roads[at] = cost;
+        sites.len = @min(sites.len + 1, capacity);
     }
-    return sites;
-}
-
-/// The fewest quarry sites an island must offer near its harbor.
-pub fn requiredQuarrySites(chart: usize) usize {
-    return if (chart == 0) opening_quarry_sites else min_quarry_sites;
-}
+};
 
 /// Producers that deliver only when settlers can walk to them from the harbor.
 pub fn needsHarbor(k: Kind) bool {
@@ -421,6 +408,61 @@ pub const Game = struct {
             }
         }
         return null;
+    }
+
+    /// Road tiles needed to join each tile of an island to the tiles settlers
+    /// already reach from the harbor, by the same rules as `roadPath`: zero
+    /// for reached tiles, null where no road can go.
+    pub fn roadCosts(g: *const Game, chart: usize, costs_out: *[geography.max_grid_area]?u16) void {
+        const grid = geography.grids[chart];
+        const tiles = g.tilesOn(chart);
+        const walk = roads.Walk.fromPort(tiles, chart);
+        var queue: [geography.max_grid_area]u32 = undefined;
+        var head: usize = 0;
+        var tail: usize = 0;
+        for (0..grid.area()) |i| {
+            costs_out[i] = null;
+            if (!walk.seen.isSet(i)) continue;
+            costs_out[i] = 0;
+            queue[tail] = @intCast(i);
+            tail += 1;
+        }
+        while (head < tail) : (head += 1) {
+            const at = queue[head];
+            for (roads.directions) |direction| {
+                const next = roads.neighbor(grid.cell(at), direction, grid) orelse continue;
+                const i = grid.index(next);
+                if (costs_out[i] != null or depth(next, chart) < 0) continue;
+                if (tiles[i].kind != .empty or site(next, chart) == .fruit) continue;
+                costs_out[i] = costs_out[at].? + 1;
+                queue[tail] = @intCast(i);
+                tail += 1;
+            }
+        }
+    }
+
+    /// The empty sites of a kind whose roads to the harbor fit within `budget`.
+    /// A site's cost is the road up to, but not on, the site itself.
+    pub fn resourceSites(g: *const Game, chart: usize, wanted: Site, budget: u16) ResourceSites {
+        var road_costs: [geography.max_grid_area]?u16 = undefined;
+        g.roadCosts(chart, &road_costs);
+        const grid = geography.grids[chart];
+        const tiles = g.tilesOn(chart);
+        var sites = ResourceSites{};
+        for (0..grid.area()) |i| {
+            const cell = grid.cell(i);
+            if (tiles[i].kind != .empty or depth(cell, chart) < 0 or site(cell, chart) != wanted) continue;
+            var cost: ?u16 = if (road_costs[i] == 0) 0 else null;
+            for (roads.directions) |direction| {
+                const next = roads.neighbor(cell, direction, grid) orelse continue;
+                const reach = road_costs[grid.index(next)] orelse continue;
+                cost = if (cost) |known| @min(known, reach) else reach;
+            }
+            if (cost) |roads_needed| {
+                if (roads_needed <= budget) sites.offer(cell, roads_needed);
+            }
+        }
+        return sites;
     }
 
     /// Test support: lays free road so a building on `target` joins the harbor.
@@ -1047,35 +1089,75 @@ test "additional wells cannot push an island past its daily water capacity" {
     try std.testing.expectEqual(limit - 1, g.stores[0].water);
 }
 
-test "every island offers enough quarry sites on land within reach of its harbor" {
+/// Each island as its first settlers find it: Java as a new game starts,
+/// every other island with its harbor just opened.
+fn freshIsland(chart: usize) Game {
+    var g = Game.init();
+    if (chart != 0) g.chartHarbor(chart);
+    return g;
+}
+
+test "every island offers enough stone, deer and fruit within a short road of its harbor" {
+    var failures: usize = 0;
     for (0..settlement_count) |chart| {
-        const sites = quarrySites(chart);
-        const home = quay(chart);
-        std.testing.expect(sites.len >= requiredQuarrySites(chart)) catch |err| {
-            std.debug.print("{s} has {d} quarry sites near its harbor\n", .{ geography.names[chart], sites.len });
-            return err;
-        };
-        for (sites.slice()) |cell| {
-            try std.testing.expectEqual(Site.outcrop, site(cell, chart));
-            try std.testing.expect(depth(cell, chart) >= 0);
-            try std.testing.expect(@max(cell.x, home.x) - @min(cell.x, home.x) <= quarry_reach);
-            try std.testing.expect(@max(cell.y, home.y) - @min(cell.y, home.y) <= quarry_reach);
+        const g = freshIsland(chart);
+        for ([_]Site{ .outcrop, .deer, .fruit }) |wanted| {
+            const sites = g.resourceSites(chart, wanted, roadBudget(chart));
+            if (sites.len >= requiredSites(chart, wanted)) continue;
+            std.debug.print("{s} has {d} {s} sites within {d} road tiles of its harbor, needs {d}\n", .{ geography.names[chart], sites.len, @tagName(wanted), roadBudget(chart), requiredSites(chart, wanted) });
+            failures += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+test "resource site costs match the roads a player would actually lay" {
+    var buffer: [256]Cell = undefined;
+    for ([_]usize{ 0, 1, 2, geography.borneo }) |chart| {
+        const g = freshIsland(chart);
+        for ([_]Site{ .outcrop, .deer, .fruit }) |wanted| {
+            const sites = g.resourceSites(chart, wanted, site_road_budget);
+            for (sites.slice(), sites.roads[0..sites.len], 0..) |cell, cost, i| {
+                try std.testing.expectEqual(wanted, site(cell, chart));
+                if (i > 0) try std.testing.expect(sites.roads[i - 1] <= cost);
+                const path = g.roadPath(chart, cell, &buffer).?;
+                try std.testing.expectEqual(@as(usize, cost), path.len);
+            }
         }
     }
 }
 
-test "quarry sites stop at the reach limit and at the water's edge" {
-    // Java's far outcrops lie beyond the reach limit or across open ground the walk never leaves.
-    const sites = quarrySites(0);
+test "far sites cost more road than the budget allows" {
+    // Java's outcrop on the southern plain is many road tiles from the start.
+    const g = Game.init();
+    const sites = g.resourceSites(0, .outcrop, opening_road_budget);
     for (sites.slice()) |cell| try std.testing.expect(!(cell.x == 35 and cell.y == 53));
     try std.testing.expect(site(.{ .x = 35, .y = 53 }, 0) == .outcrop);
+}
+
+test "the opening settlers can connect a hunting lodge and fruit with the starting stone" {
+    var g = Game.init();
+    var buffer: [64]Cell = undefined;
+    const herd = g.resourceSites(0, .deer, opening_road_budget).slice()[0];
+    const path = g.roadPath(0, herd, &buffer).?;
+    try std.testing.expect(g.build(0, herd, .lodge) == null);
+    for (path) |step| try std.testing.expect(g.build(0, step, .road) == null);
+    try std.testing.expect(g.connected(0, herd));
+    try std.testing.expect(g.production(0).venison > 0);
+    const trees = g.resourceSites(0, .fruit, opening_road_budget);
+    for (trees.slice()[0..2]) |tree| {
+        const trail = g.roadPath(0, tree, &buffer).?;
+        for (trail) |step| try std.testing.expect(g.build(0, step, .road) == null);
+    }
+    try std.testing.expect(g.production(0).fruit >= 2 * fruit_yield);
 }
 
 test "the opening settlers can quarry and connect two quarries near Java's harbor with starting stores" {
     var g = Game.init();
     var connected_quarries: usize = 0;
     var buffer: [64]Cell = undefined;
-    for (quarrySites(0).slice()) |cell| {
+    const sites = g.resourceSites(0, .outcrop, opening_road_budget);
+    for (sites.slice()) |cell| {
         if (connected_quarries == 2) break;
         const path = g.roadPath(0, cell, &buffer) orelse continue;
         if (path.len * costs[@backingInt(Kind.road)] > g.stores[0].stone) continue;
