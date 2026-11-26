@@ -286,6 +286,7 @@ const UI = struct {
             return;
         }
         if (built) {
+            if (u.g.footpathProblem(crossing) != null) return u.bridgeRoads(crossing, names, footer_y);
             label("Move a settler to a free bed on the other island.", 309, 276, 19, ink, false);
             for (c.charts, names, 0..) |chart, name, row| {
                 num("{s}   {d} resident{s}   /   {d} places available", .{
@@ -334,6 +335,46 @@ const UI = struct {
         }
         if (crossing == s.strait and u.g.islandOpen(2)) {
             num("Bali to Lombok needs {d} spans. The bridge limit is {d}.", .{ s.bali_lombok_spans, s.max_bridge_spans }, 309, footer_y - 69, 17, muted);
+        }
+        if (u.modal_note) |note| label(note, 309, footer_y - 37, 17, ink, false);
+        if (button("Close", 309, footer_y, 88, 36) or r.isKeyPressed(.escape)) u.closeModal();
+    }
+
+    /// A built bridge waits for roads from both harbors before settlers can walk over it.
+    fn bridgeRoads(u: *UI, crossing: usize, names: [2][:0]const u8, footer_y: f32) void {
+        const c = s.crossings[crossing];
+        label("Settlers walk over the bridge once a road from each harbor reaches it.", 309, 276, 19, ink, false);
+        var caption: [2][64]u8 = undefined;
+        for (c.charts, names, 0..) |chart, name, side| {
+            const y = 316 + a.f(side) * 52;
+            var buffer: [s.geography.max_grid_area]s.Cell = undefined;
+            const path = u.g.bridgeRoadPath(crossing, chart, &buffer);
+            if (path) |tiles| {
+                if (tiles.len == 0) {
+                    num("{s}   road reaches the bridge", .{name}, 309, y + 7, 19, ink);
+                    continue;
+                }
+                num("{s}   {d} road tiles to the bridge", .{ name, tiles.len }, 309, y + 7, 19, ink);
+                const stone = tiles.len * s.costs[@backingInt(s.Kind.road)];
+                const pave = std.fmt.bufPrintSentinel(&caption[side], "Lay road   /   {d} stone", .{stone}, 0) catch unreachable;
+                if (button(pave, 647, y, 238, 36)) {
+                    if (u.g.stores[chart].stone < stone) {
+                        u.playCue(.denied);
+                        u.modal_note = "The island needs more stone for this road.";
+                        return;
+                    }
+                    for (tiles) |cell| {
+                        if (u.dispatch(.{ .build = .{ .island = chart, .cell = cell, .kind = .road } }).problem()) |failure| {
+                            u.playCue(.denied);
+                            u.modal_note = failure;
+                            return;
+                        }
+                    }
+                    u.playCue(.build);
+                    u.modal_note = if (u.g.footpathProblem(crossing) == null) "The road reaches the bridge. Settlers can walk across." else "The road reaches the bridge on this side.";
+                    return;
+                }
+            } else num("{s}   no road can reach the bridge", .{name}, 309, y + 7, 19, muted);
         }
         if (u.modal_note) |note| label(note, 309, footer_y - 37, 17, ink, false);
         if (button("Close", 309, footer_y, 88, 36) or r.isKeyPressed(.escape)) u.closeModal();
@@ -1050,7 +1091,7 @@ const UI = struct {
                 } else u.msg = if (k != .empty) s.names[@backingInt(k)] else switch (s.site(p, chart)) {
                     .outcrop => "Rocky outcrop - suitable for a quarry.",
                     .deer => "Deer herd - suitable for a hunting lodge.",
-                    .fruit => if (roads.Walk.fromPort(u.g.tilesOn(chart), chart).contains(p))
+                    .fruit => if (u.g.footWalk(chart).contains(p))
                         "Workers can reach this fruit tree from the harbor."
                     else
                         "Fruit tree. Link a nearby tree or building to the harbor to gather fruit.",

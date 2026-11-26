@@ -205,7 +205,8 @@ pub const Player = struct {
     }
 
     /// Supplies Bali still needs from Java: six days of whatever food and
-    /// water it can't yet make, then materials for the lighthouse and bridge.
+    /// water it can't yet make, then materials for the lighthouse, the bridge
+    /// and the road from Bali's harbor to it.
     fn baliWants(p: *const Player, arriving: u16) Stores {
         const g = &p.game;
         const ledger = queries.ledger(g, bali);
@@ -219,8 +220,16 @@ pub const Player = struct {
         const bridge = if (g.bridges[0]) Stores{} else domain.bridge_cost;
         const building: u16 = 16;
         wants.timber = (lighthouse + bridge.timber + building) -| g.stores[bali].timber;
-        wants.stone = (bridge.stone + domain.well_stone) -| g.stores[bali].stone;
+        const road = p.bridgeRoad(bali) * domain.costs[@backingInt(Kind.road)];
+        wants.stone = (bridge.stone + domain.well_stone + road) -| g.stores[bali].stone;
         return wants;
+    }
+
+    /// Road tiles still needed from an island's harbor to the strait bridge.
+    fn bridgeRoad(p: *const Player, chart: usize) u16 {
+        var buffer: [domain.geography.max_grid_area]Cell = undefined;
+        const path = p.game.bridgeRoadPath(domain.strait, chart, &buffer) orelse return 0;
+        return @intCast(path.len);
     }
 
     /// Timber a survey must carry before the player lands settlers with it:
@@ -236,7 +245,7 @@ pub const Player = struct {
         if (survey) {
             if (moored != java or g.coins < 20 or g.people < 4) return;
         } else {
-            if (g.bridges[0]) return p.overland();
+            if (g.bridges[domain.strait] and g.footpathProblem(domain.strait) == null) return p.overland();
             if (moored == bali) {
                 if (p.act(.{ .sail_ferry = java })) p.log.note(g, "ferry returns to Java", .{});
                 return;
@@ -295,6 +304,15 @@ pub const Player = struct {
     fn charter(p: *Player) void {
         const g = &p.game;
         if (!g.bridges[domain.strait] and g.bridgeProblem(domain.strait) == null and p.act(.{ .build_bridge = domain.strait })) p.log.note(g, "bridge built", .{});
+        // Settlers walk over the bridge once a road from each harbor reaches it.
+        if (g.bridges[domain.strait]) {
+            for ([_]usize{ java, bali }) |chart| {
+                var buffer: [domain.geography.max_grid_area]Cell = undefined;
+                const path = g.bridgeRoadPath(domain.strait, chart, &buffer) orelse continue;
+                if (path.len * domain.costs[@backingInt(Kind.road)] > g.stores[chart].stone) continue;
+                p.pave(chart, path);
+            }
+        }
         if (!g.charter.won and g.coins >= 30 and g.people >= 8 and p.timber(bali) >= domain.costs[@backingInt(Kind.light)]) {
             _ = p.placeOnOpenGround(bali, .light);
         }

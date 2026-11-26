@@ -507,7 +507,7 @@ fn roadTiles(tiles: []const s.Tile, chart: usize, area: TileRange) void {
 fn walkers(g: *const s.Game, chart: usize, time: f32) void {
     const residents = @min(8, g.residents(chart));
     if (g.workforce(chart) == 0) return;
-    const walk = roads.Walk.fromPort(g.tilesOn(chart), chart);
+    const walk = g.footWalk(chart);
     if (walk.len < 2) return;
     const length = f(walk.len - 1);
     for (0..residents) |i| {

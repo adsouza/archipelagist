@@ -15,7 +15,7 @@ const Index = std.math.IntFittingRange(0, max_area - 1);
 
 pub const Walk = struct {
     grid: s.geography.Grid,
-    stops: [2 * max_area - 1]Index = undefined,
+    stops: [2 * max_area]Index = undefined,
     len: usize = 0,
     seen: std.StaticBitSet(max_area) = .empty,
 
@@ -24,13 +24,22 @@ pub const Walk = struct {
         var walk = Walk{ .grid = grid };
         const port = grid.index(s.quay(chart));
         if (tiles[port].kind != .port) return walk;
+        walk.extend(tiles, chart, s.quay(chart));
+        return walk;
+    }
 
+    /// Add the tiles settlers reach on foot from `start`, as when they step
+    /// off a bridge there. A start already reached adds nothing.
+    pub fn extend(walk: *Walk, tiles: []const s.Tile, chart: usize, start: s.Cell) void {
+        const grid = walk.grid;
+        const root = grid.index(start);
+        if (walk.seen.isSet(root) or s.depth(start, chart) < 0) return;
         var path: [max_area]Index = undefined;
         var direction_at: [max_area]u8 = undefined;
         var depth: usize = 1;
-        path[0] = @intCast(port);
+        path[0] = @intCast(root);
         direction_at[0] = 0;
-        walk.record(port);
+        walk.record(root);
         while (depth > 0) {
             const top = depth - 1;
             if (direction_at[top] == directions.len) {
@@ -50,7 +59,6 @@ pub const Walk = struct {
             depth += 1;
             walk.record(next_index);
         }
-        return walk;
     }
 
     pub fn contains(walk: *const Walk, cell: s.Cell) bool {

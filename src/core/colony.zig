@@ -304,6 +304,9 @@ pub const Game = struct {
     pub const buildBridge = bridge.buildBridge;
     pub const crossBridge = bridge.crossBridge;
     pub const hasBridge = bridge.hasBridge;
+    pub const footWalk = bridge.footWalk;
+    pub const footpathProblem = bridge.footpathProblem;
+    pub const bridgeRoadReaches = bridge.bridgeRoadReaches;
     // charter.zig
     pub const charterComplete = charter.charterComplete;
     pub const hasFounded = charter.hasFounded;
@@ -369,17 +372,36 @@ pub const Game = struct {
 
     /// Whether settlers can walk from the harbor to this tile.
     pub fn connected(g: *const Game, chart: usize, p: Cell) bool {
-        return roads.Walk.fromPort(g.tilesOn(chart), chart).contains(p);
+        return g.footWalk(chart).contains(p);
     }
 
     /// The shortest run of empty tiles a road must cover so that a building on
     /// `target` joins the tiles settlers already reach from the harbor, listed
     /// from the harbor side. Null when no land path exists or `out` is too short.
     pub fn roadPath(g: *const Game, chart: usize, target: Cell, out: []Cell) ?[]Cell {
+        const walk = g.footWalk(chart);
+        return g.roadPathFrom(chart, &walk, target, out);
+    }
+
+    /// The road tiles that would join a bridge's end on `chart` to that
+    /// island's own harbor, the bridgehead included when settlers can't
+    /// already stand on it. Empty once the harbor's roads reach the bridge.
+    pub fn bridgeRoadPath(g: *const Game, crossing: usize, chart: usize, out: []Cell) ?[]Cell {
+        const head = bridge.crossings[crossing].headOn(chart);
+        const walk = roads.Walk.fromPort(g.tilesOn(chart), chart);
+        if (walk.contains(head)) return out[0..0];
+        const path = g.roadPathFrom(chart, &walk, head, out) orelse return null;
+        // Settlers stand on features and roads, so plain ground needs paving.
+        if (g.tileAt(chart, head) != .empty or site(head, chart) != .plain or forest(head, chart)) return path;
+        if (path.len == out.len) return null;
+        out[path.len] = head;
+        return out[0 .. path.len + 1];
+    }
+
+    fn roadPathFrom(g: *const Game, chart: usize, walk: *const roads.Walk, target: Cell, out: []Cell) ?[]Cell {
         const grid = geography.grids[chart];
         if (!grid.contains(target) or depth(target, chart) < 0) return null;
         const tiles = g.tilesOn(chart);
-        const walk = roads.Walk.fromPort(tiles, chart);
         if (walk.contains(target)) return out[0..0];
         const none = std.math.maxInt(u32);
         var from: [geography.max_grid_area]u32 = undefined;
@@ -423,7 +445,7 @@ pub const Game = struct {
     pub fn roadCosts(g: *const Game, chart: usize, costs_out: *[geography.max_grid_area]?u16) void {
         const grid = geography.grids[chart];
         const tiles = g.tilesOn(chart);
-        const walk = roads.Walk.fromPort(tiles, chart);
+        const walk = g.footWalk(chart);
         var queue: [geography.max_grid_area]u32 = undefined;
         var head: usize = 0;
         var tail: usize = 0;
@@ -477,6 +499,15 @@ pub const Game = struct {
         var buffer: [geography.max_grid_area]Cell = undefined;
         const path = g.roadPath(chart, target, &buffer) orelse unreachable;
         for (path) |cell| g.tiles[tileIndex(chart, cell)] = .{ .kind = .road };
+    }
+
+    /// Test support: lays free road from both harbors onto a bridge's ends.
+    pub fn paveBridge(g: *Game, crossing: usize) void {
+        var buffer: [geography.max_grid_area]Cell = undefined;
+        for (bridge.crossings[crossing].charts) |chart| {
+            const path = g.bridgeRoadPath(crossing, chart, &buffer) orelse unreachable;
+            for (path) |cell| g.tiles[tileIndex(chart, cell)] = .{ .kind = .road };
+        }
     }
 
     pub fn count(g: *const Game, k: Kind) u16 {
@@ -613,8 +644,9 @@ pub const Game = struct {
     fn productionForDay(g: *const Game, chart: usize, room: Stores, update: ?[]Tile) Stores {
         const harbor: u16 = @intFromBool(g.islandOpen(chart));
         const strength = g.workforce(chart);
-        // Producers deliver only when settlers can walk to them from the harbor.
-        const walk = roads.Walk.fromPort(g.tilesOn(chart), chart);
+        // Producers deliver only when settlers can walk to them from a harbor,
+        // over a bridge if need be.
+        const walk = g.footWalk(chart);
         const harvested = if (harbor > 0 and (strength > 0 or update != null))
             g.harvest(chart, strength, .{ .timber = room.timber -| harbor, .venison = room.venison }, &walk, update)
         else

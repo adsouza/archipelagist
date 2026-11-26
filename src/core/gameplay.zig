@@ -203,6 +203,8 @@ test "overland transfers start only from an island on that bridge" {
     try std.testing.expectEqualStrings("Choose an island on that bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 2, .cargo = .{ .timber = 1 } } }).problem().?);
     try std.testing.expectEqualStrings("Choose a bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = domain.crossings.len, .source = 0, .cargo = .{ .timber = 1 } } }).problem().?);
     game.stores[1].timber = 3;
+    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 1, .cargo = .{ .timber = 1 } } }).problem().?);
+    game.paveBridge(0);
     try std.testing.expect(apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 1, .cargo = .{ .timber = 1 } } }) == .applied);
     try std.testing.expectEqual(@as(u16, 2), game.stores[1].timber);
 }

@@ -4,6 +4,7 @@
 const std = @import("std");
 const colony = @import("colony.zig");
 const terrain = @import("terrain.zig");
+const roads = @import("roads.zig");
 const Game = colony.Game;
 const Cell = colony.Cell;
 const Stores = colony.Stores;
@@ -45,6 +46,11 @@ pub const Crossing = struct {
         return crossing.charts[0] == chart or crossing.charts[1] == chart;
     }
 
+    /// The bridgehead on `chart`, which must be one end.
+    pub fn headOn(crossing: Crossing, chart: usize) Cell {
+        return if (crossing.charts[0] == chart) crossing.heads[0] else crossing.heads[1];
+    }
+
     /// The island across the bridge from `chart`, which must be one end.
     pub fn across(crossing: Crossing, chart: usize) usize {
         return if (crossing.charts[0] == chart) crossing.charts[1] else crossing.charts[0];
@@ -81,6 +87,42 @@ pub fn hasBridge(g: *const Game, chart: usize) bool {
     return false;
 }
 
+/// The tiles settlers reach on foot on `chart`: everything its harbor's roads
+/// reach, and everything reached from the end of a bridge whose other end the
+/// far island's harbor roads reach. Settlers walk over a bridge in either
+/// direction once a road leads to it.
+pub fn footWalk(g: *const Game, chart: usize) roads.Walk {
+    const tiles = g.tilesOn(chart);
+    var walk = roads.Walk.fromPort(tiles, chart);
+    for (crossings, g.bridges) |crossing, built| {
+        if (!built or !crossing.joins(chart)) continue;
+        const far = crossing.across(chart);
+        if (!harborReaches(g, far, crossing.headOn(far))) continue;
+        walk.extend(tiles, chart, crossing.headOn(chart));
+    }
+    return walk;
+}
+
+fn harborReaches(g: *const Game, chart: usize, cell: Cell) bool {
+    return roads.Walk.fromPort(g.tilesOn(chart), chart).contains(cell);
+}
+
+/// Why settlers cannot walk between the two harbors over a bridge, if they cannot.
+pub fn footpathProblem(g: *const Game, crossing: usize) ?[:0]const u8 {
+    if (crossing >= crossings.len) return "Choose a bridge.";
+    if (!g.bridges[crossing]) return "Build the bridge first.";
+    const plan = crossings[crossing];
+    for (plan.charts, plan.heads) |chart, head| {
+        if (!harborReaches(g, chart, head)) return "Lay roads from both harbors to the bridge.";
+    }
+    return null;
+}
+
+/// Whether a road from each harbor reaches the bridge.
+pub fn bridgeRoadReaches(g: *const Game, crossing: usize, chart: usize) bool {
+    return harborReaches(g, chart, crossings[crossing].headOn(chart));
+}
+
 fn endProblem(crossing: usize, chart: usize) ?[:0]const u8 {
     if (crossing >= crossings.len) return "Choose a bridge.";
     if (!crossings[crossing].joins(chart)) return "Choose an island on that bridge.";
@@ -100,6 +142,7 @@ pub fn sendCargo(g: *Game, crossing: usize, source: usize, load: Stores) ?[:0]co
         if (g.mooredChart() != source) return "The ferry must be moored at the loading port.";
         return g.sendFerry(target, 0, load);
     }
+    if (g.footpathProblem(crossing)) |problem| return problem;
     if (load.empty()) return "Choose supplies to send.";
     if (!g.bridgeCargoLimit(crossing, source).includes(load)) return "There is not enough stock or room for this cargo.";
     g.stores[source].take(load);
@@ -142,7 +185,7 @@ pub fn buildBridge(g: *Game, crossing: usize) ?[:0]const u8 {
 /// Walk one settler across a bridge to `destination`.
 pub fn crossBridge(g: *Game, crossing: usize, destination: usize) ?[:0]const u8 {
     if (endProblem(crossing, destination)) |problem| return problem;
-    if (!g.bridges[crossing]) return "Build the bridge first.";
+    if (g.footpathProblem(crossing)) |problem| return problem;
     const source = crossings[crossing].across(destination);
     if (g.residents(source) == 0) return "No settlers are waiting to cross from that island.";
     if (g.freeLandingSpace(destination) == 0) return "There is no room for more settlers at the destination.";
@@ -150,6 +193,29 @@ pub fn crossBridge(g: *Game, crossing: usize, destination: usize) ?[:0]const u8 
     if (source != 0) g.island_people[source - 1] -= 1;
     if (destination != 0) g.island_people[destination - 1] += 1;
     return null;
+}
+
+test "a road to one end of a bridge lets settlers walk on from the other end" {
+    var g = Game.init();
+    g.fleet.charted[colony.ocean.routeTo(madura).?] = true;
+    g.openPort(madura);
+    const c = crossings[1];
+    const madura_head = c.headOn(madura);
+    // Madura's harbor roads don't reach the bridgehead yet.
+    try std.testing.expect(!g.connected(madura, madura_head));
+    try std.testing.expect(!g.footWalk(madura).contains(madura_head));
+    // Java's walk already reaches its bridgehead, so once the bridge stands
+    // its settlers walk over and on into Madura.
+    try std.testing.expect(g.bridgeRoadReaches(1, 0));
+    g.bridges[1] = true;
+    try std.testing.expect(g.footWalk(madura).contains(madura_head));
+    // Moving residents needs a road from Madura's harbor too.
+    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.footpathProblem(1).?);
+    g.paveBridge(1);
+    try std.testing.expect(g.footpathProblem(1) == null);
+    // Without the bridge the walk stops at the shore again.
+    g.bridges[1] = false;
+    try std.testing.expectEqual(roads.Walk.fromPort(g.tilesOn(0), 0).len, g.footWalk(0).len);
 }
 
 test "every crossing fits the span limit from land to land" {
@@ -201,6 +267,8 @@ test "a Java to Madura bridge carries settlers and stores both ways" {
     try std.testing.expect(g.hasBridge(madura) and g.hasBridge(0) and !g.hasBridge(1));
     try std.testing.expectEqual(@as(u16, 10) - c.cost.timber, g.stores[0].timber);
     try std.testing.expect(g.stores[madura].empty());
+    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(1, 0).?);
+    g.paveBridge(1);
     try std.testing.expect(g.crossBridge(1, 0) == null);
     try std.testing.expectEqual(@as(u16, 5), g.residents(0));
     try std.testing.expectEqual(@as(u16, 3), g.residents(madura));

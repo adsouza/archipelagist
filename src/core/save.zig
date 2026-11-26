@@ -472,6 +472,8 @@ test "cargo resumes at sea and local stock pays for the bridge on both shores" {
     try std.testing.expect(g.stores[0].empty() and g.stores[1].empty());
     g = decode(&encode(g)).?;
     try std.testing.expect(g.bridges[0]);
+    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(0, 0).?);
+    g.paveBridge(0);
     try std.testing.expect(g.crossBridge(0, 0) == null);
     try std.testing.expectEqual(@as(u16, 5), g.residents(0));
     g.stores[1].timber = 3;
