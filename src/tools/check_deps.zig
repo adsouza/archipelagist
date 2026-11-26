@@ -37,7 +37,7 @@ pub const policy = [_]Folder{
             .{ .files = &.{ "colony.zig", "fleet.zig", "ferry.zig", "bridge.zig", "charter.zig", "roads.zig" }, .mutual = true },
             .{ .files = &.{ "gameplay.zig", "queries.zig", "stock_warnings.zig", "save.zig" } },
             .{ .files = &.{"journal.zig"} },
-            .{ .files = &.{"stateful.zig"} },
+            .{ .files = &.{ "stateful.zig", "autoplay.zig" } },
             .{ .files = &.{"root.zig"} },
         },
     },

@@ -26,4 +26,5 @@ test {
     _ = save;
     _ = journal;
     _ = @import("stateful.zig");
+    _ = @import("autoplay.zig");
 }
