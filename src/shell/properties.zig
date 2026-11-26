@@ -189,6 +189,48 @@ test "property: extra wells respect the cap at every generated workforce size" {
     };
 }
 
+fn openIsland(game: *domain.Game, chart: usize) void {
+    if (chart == 0) return;
+    game.chartHarbor(chart);
+    game.land(chart, 1, .{ .timber = 30, .grain = 10, .water = 10 });
+}
+
+fn quarryCase(seed: u64) !void {
+    var random_state = std.Random.DefaultPrng.init(seed);
+    const random = random_state.random();
+    // Half the cases open on Java, as every new game does.
+    const chart = if (random.boolean()) 0 else random.uintLessThan(usize, domain.settlement_count);
+    var game = domain.Game.init();
+    openIsland(&game, chart);
+    const sites = domain.quarrySites(chart);
+    try std.testing.expect(sites.len >= domain.requiredQuarrySites(chart));
+
+    // Every listed stone source accepts a quarry through the command path.
+    const cell = sites.slice()[random.uintLessThan(usize, sites.len)];
+    const before = game.stores[chart].stone;
+    try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = cell, .kind = .quarry } }) == .applied);
+    try std.testing.expect(queries.ledger(&game, chart).production.stone > 0);
+    _ = gameplay.apply(&game, .{ .advance = gameplay.untilNextDay(&game) });
+    try std.testing.expect(game.stores[chart].stone > before);
+
+    // Any other land tile near the harbor refuses one and leaves the game unchanged.
+    const grid = domain.geography.grids[chart];
+    const home = domain.quay(chart);
+    const other = domain.Cell{
+        .x = @min(grid.width - 1, (home.x -| domain.quarry_reach) + random.uintLessThan(usize, 2 * domain.quarry_reach + 1)),
+        .y = @min(grid.height - 1, (home.y -| domain.quarry_reach) + random.uintLessThan(usize, 2 * domain.quarry_reach + 1)),
+    };
+    if (domain.site(other, chart) != .outcrop and game.tileAt(chart, other) == .empty)
+        try rejected(&game, .{ .build = .{ .island = chart, .cell = other, .kind = .quarry } });
+}
+
+test "property: every generated island lets its first settlers quarry stone near the harbor" {
+    for (1..129) |seed| quarryCase(seed) catch |err| {
+        std.debug.print("Quarry site seed={d}\n", .{seed});
+        return err;
+    };
+}
+
 test "property: generated invalid session clocks and speed tags are rejected" {
     var random_state = std.Random.DefaultPrng.init(0x5649534c4553);
     const random = random_state.random();

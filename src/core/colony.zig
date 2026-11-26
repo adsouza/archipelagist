@@ -114,6 +114,67 @@ pub fn wellSite(p: Cell, chart: usize) bool {
     return depth(p, chart) >= 0.20 and !forest(p, chart) and site(p, chart) == .plain;
 }
 
+/// How far, in tiles, from its harbor an island's quarry sites must lie to
+/// count toward its opening stone supply.
+pub const quarry_reach: usize = 12;
+/// Every settlement needs this many quarry sites within reach of its harbor.
+pub const min_quarry_sites: usize = 2;
+/// The starting island carries the whole early game, so it needs more.
+pub const opening_quarry_sites: usize = 4;
+
+/// The rocky outcrops within `quarry_reach` of a harbor that settlers can reach
+/// over land by building roads from the quay.
+pub const QuarrySites = struct {
+    const window = 2 * quarry_reach + 1;
+    cells: [window * window]Cell = undefined,
+    len: usize = 0,
+
+    pub fn slice(sites: *const QuarrySites) []const Cell {
+        return sites.cells[0..sites.len];
+    }
+};
+
+/// Finds the quarry sites near a harbor from the baked terrain alone. Roads
+/// join along shared edges, so the search walks land four ways from the quay.
+pub fn quarrySites(chart: usize) QuarrySites {
+    const grid = geography.grids[chart];
+    const home = grid.quay;
+    const Window = QuarrySites.window;
+    const left = home.x -| quarry_reach;
+    const top = home.y -| quarry_reach;
+    var seen: std.StaticBitSet(Window * Window) = .empty;
+    var queue: [Window * Window]Cell = undefined;
+    var head: usize = 0;
+    var tail: usize = 0;
+    var sites = QuarrySites{};
+    if (depth(home, chart) < 0) return sites;
+    queue[tail] = home;
+    tail += 1;
+    seen.set((home.y - top) * Window + (home.x - left));
+    while (head < tail) : (head += 1) {
+        const cell = queue[head];
+        if (site(cell, chart) == .outcrop) {
+            sites.cells[sites.len] = cell;
+            sites.len += 1;
+        }
+        for (roads.directions) |direction| {
+            const next = roads.neighbor(cell, direction, grid) orelse continue;
+            if (next.x < left or next.y < top or next.x - left >= Window or next.y - top >= Window) continue;
+            const slot = (next.y - top) * Window + (next.x - left);
+            if (seen.isSet(slot) or depth(next, chart) < 0) continue;
+            seen.set(slot);
+            queue[tail] = next;
+            tail += 1;
+        }
+    }
+    return sites;
+}
+
+/// The fewest quarry sites an island must offer near its harbor.
+pub fn requiredQuarrySites(chart: usize) usize {
+    return if (chart == 0) opening_quarry_sites else min_quarry_sites;
+}
+
 pub const day_seconds: f32 = 7;
 
 pub fn dailyUse(people: u16) u16 {
@@ -905,4 +966,40 @@ test "additional wells cannot push an island past its daily water capacity" {
     } else return error.NotEnoughWellSites;
     _ = g.tick();
     try std.testing.expectEqual(limit - 1, g.stores[0].water);
+}
+
+test "every island offers enough quarry sites on land within reach of its harbor" {
+    for (0..settlement_count) |chart| {
+        const sites = quarrySites(chart);
+        const home = quay(chart);
+        std.testing.expect(sites.len >= requiredQuarrySites(chart)) catch |err| {
+            std.debug.print("{s} has {d} quarry sites near its harbor\n", .{ geography.names[chart], sites.len });
+            return err;
+        };
+        for (sites.slice()) |cell| {
+            try std.testing.expectEqual(Site.outcrop, site(cell, chart));
+            try std.testing.expect(depth(cell, chart) >= 0);
+            try std.testing.expect(@max(cell.x, home.x) - @min(cell.x, home.x) <= quarry_reach);
+            try std.testing.expect(@max(cell.y, home.y) - @min(cell.y, home.y) <= quarry_reach);
+        }
+    }
+}
+
+test "quarry sites stop at the reach limit and at the water's edge" {
+    // Java's far outcrops lie beyond the reach limit or across open ground the walk never leaves.
+    const sites = quarrySites(0);
+    for (sites.slice()) |cell| try std.testing.expect(!(cell.x == 35 and cell.y == 53));
+    try std.testing.expect(site(.{ .x = 35, .y = 53 }, 0) == .outcrop);
+}
+
+test "the opening settlers can quarry stone near Java's harbor" {
+    var g = Game.init();
+    const sites = quarrySites(0);
+    const affordable = starting_stores.timber / costs[@backingInt(Kind.quarry)];
+    const built = @min(affordable, sites.len);
+    try std.testing.expect(built >= 2);
+    for (sites.slice()[0..built]) |cell| try std.testing.expect(g.build(0, cell, .quarry) == null);
+    const before = g.stores[0].stone;
+    _ = g.tick();
+    try std.testing.expect(g.stores[0].stone > before);
 }
