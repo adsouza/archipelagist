@@ -14,7 +14,7 @@ const save = @import("save.zig");
 pub const magic = "AJNL";
 /// Bump when the encoding of `gameplay.Command` or a record changes.
 /// The golden-bytes test below fails when the layout changes without it.
-pub const version: u16 = 4;
+pub const version: u16 = 5;
 pub const header = magic.* ++ std.mem.toBytes(std.mem.nativeToLittle(u16, version));
 
 pub const Kind = enum(u8) { snapshot = 1, command = 2, checkpoint = 3 };
@@ -346,8 +346,6 @@ test "every command kind round-trips through the journal encoding" {
     const commands = [_]gameplay.Command{
         .{ .build = .{ .island = 3, .cell = .{ .x = 12, .y = 40 }, .kind = .well } },
         .{ .build_bridge = 1 },
-        .{ .cross_bridge = .{ .crossing = 1, .destination = 0 } },
-        .{ .transfer_stores = .{ .crossing = 0, .source = 0, .cargo = .{ .timber = 4, .water = 9 } } },
         .{ .survey_harbor = .{ .destination = 2, .manifest = .{ .settlers = 3, .cargo = .{ .water = 4 } } } },
         .{ .send_ferry = .{ .destination = 1, .manifest = .{ .settlers = 2, .cargo = .{ .grain = 6 } } } },
         .{ .sail_ferry = 0 },
@@ -368,13 +366,13 @@ test "every command kind round-trips through the journal encoding" {
 test "the journal layout is pinned so a format change bumps the version" {
     // If this fails, the command encoding changed: bump `version`, then update these bytes.
     const bytes = encodeCommand(.{ .send_expedition = .{ .ship = 1, .route = 2, .manifest = .{ .settlers = 3, .cargo = .{ .timber = 4 } } } });
-    const expected = [_]u8{9} ++ [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 3, 0 } ++
+    const expected = [_]u8{7} ++ [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 3, 0 } ++
         [_]u8{ 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     try std.testing.expectEqualSlices(u8, &expected, bytes.slice());
     const ferry = encodeCommand(.{ .send_ferry = .{ .destination = 2, .manifest = .{ .settlers = 1, .cargo = .{} } } });
-    const expected_ferry = [_]u8{5} ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 1, 0 } ++ @as([12]u8, @splat(0));
+    const expected_ferry = [_]u8{3} ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 1, 0 } ++ @as([12]u8, @splat(0));
     try std.testing.expectEqualSlices(u8, &expected_ferry, ferry.slice());
-    try std.testing.expectEqual(@as(u16, 4), version);
+    try std.testing.expectEqual(@as(u16, 5), version);
 }
 
 test "malformed command bytes are rejected rather than misread" {

@@ -252,9 +252,16 @@ pub fn worldTile(p: Cell, chart: usize) [2]f32 {
 /// cargo and debit supplies in one operation.
 pub const Game = struct {
     tiles: [geography.tile_count]Tile = @splat(.{}),
-    stores: [settlement_count]Stores = .{starting_stores} ++ @as([settlement_count - 1]Stores, @splat(.{})),
+    /// Each island's goods. Islands joined over a bridge keep one shared
+    /// stockpile on the lowest-numbered of them (`depot`); read and change
+    /// goods through `store` and `stock`.
+    stockpiles: [settlement_count]Stores = .{starting_stores} ++ @as([settlement_count - 1]Stores, @splat(.{})),
     diets: [settlement_count]Diet = @splat(.{}),
     bridges: bridge.Bridges = @splat(false),
+    /// Bridges whose roads reach both harbors. Their islands share one
+    /// stockpile and settlers. Roads and bridges are never removed, so a
+    /// joined bridge stays joined.
+    joined: bridge.Bridges = @splat(false),
     /// Settlers out on a bridge, between islands.
     walkers: bridge.Walkers = .{},
     coins: u16 = 8,
@@ -300,11 +307,11 @@ pub const Game = struct {
     pub const ferrySurveyProblem = ferry.ferrySurveyProblem;
     pub const surveyByFerry = ferry.surveyByFerry;
     // bridge.zig
-    pub const bridgeCargoLimit = bridge.bridgeCargoLimit;
-    pub const sendCargo = bridge.sendCargo;
     pub const bridgeProblem = bridge.bridgeProblem;
     pub const buildBridge = bridge.buildBridge;
     pub const crossBridge = bridge.crossBridge;
+    pub const flowSettlers = bridge.flowSettlers;
+    pub const needsSettler = bridge.needsSettler;
     pub const walkingTo = bridge.walkingTo;
     pub const advanceWalkers = bridge.advanceWalkers;
     pub const hasBridge = bridge.hasBridge;
@@ -315,6 +322,64 @@ pub const Game = struct {
     pub const charterComplete = charter.charterComplete;
     pub const hasFounded = charter.hasFounded;
     pub const nextGoals = charter.nextGoals;
+
+    /// The islands `chart` is joined to over bridges, itself included.
+    pub fn group(g: *const Game, chart: usize) [settlement_count]bool {
+        var members: [settlement_count]bool = @splat(false);
+        members[chart] = true;
+        // A handful of crossings: spread until nothing changes.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (bridge.crossings, g.joined) |crossing, joined| {
+                const x = crossing.charts[0];
+                const y = crossing.charts[1];
+                if (!joined or members[x] == members[y]) continue;
+                members[x] = true;
+                members[y] = true;
+                changed = true;
+            }
+        }
+        return members;
+    }
+
+    /// The island whose stockpile `chart` draws on: the lowest-numbered
+    /// island in its group.
+    pub fn depot(g: *const Game, chart: usize) usize {
+        return std.mem.indexOfScalar(bool, &g.group(chart), true).?;
+    }
+
+    /// Two islands share one stockpile and their settlers.
+    pub fn linked(g: *const Game, a: usize, b: usize) bool {
+        return g.depot(a) == g.depot(b);
+    }
+
+    /// The goods `chart` can use, shared with every island it is joined to.
+    pub fn store(g: *Game, chart: usize) *Stores {
+        return &g.stockpiles[g.depot(chart)];
+    }
+
+    pub fn stockOf(g: *const Game, chart: usize) Stores {
+        return g.stockpiles[g.depot(chart)];
+    }
+
+    /// Join the islands of every built bridge whose roads now reach both
+    /// harbors, pooling their goods. Call after roads or bridges change.
+    pub fn relink(g: *Game) void {
+        for (bridge.crossings, g.bridges, &g.joined, 0..) |crossing, built, *joined, index| {
+            if (!built or joined.* or g.footpathProblem(index) != null) continue;
+            const a = g.depot(crossing.charts[0]);
+            const b = g.depot(crossing.charts[1]);
+            joined.* = true;
+            const keep = @min(a, b);
+            const fold = @max(a, b);
+            if (keep == fold) continue;
+            inline for (store_fields) |name| {
+                @field(g.stockpiles[keep], name) +|= @field(g.stockpiles[fold], name);
+            }
+            g.stockpiles[fold] = .{};
+        }
+    }
 
     pub fn init() Game {
         var g = Game{};
@@ -512,6 +577,7 @@ pub const Game = struct {
             const path = g.bridgeRoadPath(crossing, chart, &buffer) orelse unreachable;
             for (path) |cell| g.tiles[tileIndex(chart, cell)] = .{ .kind = .road };
         }
+        g.relink();
     }
 
     pub fn count(g: *const Game, k: Kind) u16 {
@@ -562,7 +628,7 @@ pub const Game = struct {
     pub fn land(g: *Game, chart: usize, settlers: u16, cargo: Stores) void {
         if (chart != 0) g.island_people[chart - 1] += settlers;
         if (settlers > 0 and chart >= geography.borneo) g.founded[chart - geography.borneo] = true;
-        g.stores[chart].add(cargo);
+        g.store(chart).add(cargo);
     }
 
     /// Record a surveyed harbor on the chart and open its port.
@@ -614,6 +680,15 @@ pub const Game = struct {
 
     pub fn dailyDemand(g: *const Game, chart: usize) u16 {
         return dailyUse(g.residents(chart));
+    }
+
+    /// What the islands sharing `chart`'s stockpile eat and drink in a day.
+    pub fn sharedDemand(g: *const Game, chart: usize) u16 {
+        var total: u16 = 0;
+        for (g.group(chart), 0..) |member, island| {
+            if (member) total +|= g.dailyDemand(island);
+        }
+        return total;
     }
 
     pub fn isOver(g: *const Game) bool {
@@ -717,7 +792,7 @@ pub const Game = struct {
         if (k == .lodge and site(p, chart) != .deer) return "Choose a tile where deer graze.";
         if (k == .well and !wellSite(p, chart)) return "Wells need open ground inland.";
         const cost = costs[@backingInt(k)];
-        const local = &g.stores[chart];
+        const local = g.store(chart);
         if (k == .road) {
             if (local.stone < cost) return "This island needs more stone for roads.";
             local.stone -= cost;
@@ -728,6 +803,7 @@ pub const Game = struct {
             if (k == .well) local.stone -= well_stone;
         }
         tile.* = .{ .kind = k };
+        if (k == .road) g.relink();
         if (k == .light) {
             g.coins -= 30;
             g.charter.won = true;
@@ -744,7 +820,7 @@ pub const Game = struct {
             diet.* = .{};
             return .none;
         }
-        const local = &g.stores[chart];
+        const local = g.store(chart);
         const enough_grain = local.grain >= demand;
         const enough_meat = local.venison >= demand;
         const enough_fruit = local.fruit >= demand;
@@ -769,7 +845,7 @@ pub const Game = struct {
         g.charter.housed_eight = g.charter.housed_eight or g.people >= 8;
         var shortages: [settlement_count]Shortage = undefined;
         for (0..settlement_count) |chart| {
-            const local = &g.stores[chart];
+            const local = g.store(chart);
             const incoming = g.incomingCargo(chart);
             const max_stock = std.math.maxInt(u16);
             const room = Stores{
@@ -797,7 +873,7 @@ pub const Game = struct {
         const first = g.day % count_open;
         for (0..count_open) |i| {
             const chart = open[(first + i) % count_open];
-            const local = g.stores[chart];
+            const local = g.store(chart).*;
             if (shortages[chart] != .none or g.residents(chart) < 2 or g.freeBeds(chart) == 0 or local.grain +| local.venison +| local.fruit < 3) continue;
             if (g.people == std.math.maxInt(u16)) break;
             g.people += 1;
@@ -806,20 +882,22 @@ pub const Game = struct {
         }
         if (std.mem.allEqual(Shortage, &shortages, .none)) g.coins +|= g.people / 4;
         g.charter.housed_eight = g.charter.housed_eight or g.people >= 8;
+        // Settlers walk over joined bridges to where they are needed.
+        g.flowSettlers();
         return shortages;
     }
 
     pub fn loadingLimits(g: *const Game, source: usize, target: usize, rations: Stores, incoming: Stores) Stores {
         var limits: Stores = undefined;
         inline for (store_fields) |name| {
-            const space = std.math.maxInt(u16) -| @field(g.stores[target], name) -| @field(incoming, name);
-            @field(limits, name) = @min(@field(g.stores[source], name) -| @field(rations, name), space);
+            const space = std.math.maxInt(u16) -| @field(g.stockOf(target), name) -| @field(incoming, name);
+            @field(limits, name) = @min(@field(g.stockOf(source), name) -| @field(rations, name), space);
         }
         return limits;
     }
 
     pub fn sell(g: *Game, chart: usize) bool {
-        const local = &g.stores[chart];
+        const local = g.store(chart);
         if (local.grain < 6) return false;
         local.grain -= 6;
         g.coins +|= 10;
@@ -874,7 +952,7 @@ test "settlement can feed settlers, trade, survey, and commission its lighthouse
 
 test "roads spend stone and deer feed settlers while grain remains tradable" {
     var g = Game.init();
-    g.stores[0].stone = 0;
+    g.store(0).stone = 0;
     const road = Cell{ .x = 39, .y = 44 };
     try std.testing.expect(g.build(0, road, .road) != null);
     try std.testing.expect(g.build(0, road, .quarry) != null);
@@ -883,56 +961,56 @@ test "roads spend stone and deer feed settlers while grain remains tradable" {
     try std.testing.expect(g.build(0, .{ .x = 30, .y = 35 }, .lodge) == null);
     g.paveTo(0, .{ .x = 35, .y = 53 });
     g.paveTo(0, .{ .x = 30, .y = 35 });
-    g.stores[0].grain = 6;
-    g.stores[0].venison = 0;
+    g.store(0).grain = 6;
+    g.store(0).venison = 0;
     _ = g.tick();
-    try std.testing.expectEqual(@as(u16, 3), g.stores[0].stone);
-    try std.testing.expectEqual(@as(u16, 2), g.stores[0].venison);
+    try std.testing.expectEqual(@as(u16, 3), g.store(0).stone);
+    try std.testing.expectEqual(@as(u16, 2), g.store(0).venison);
     try std.testing.expect(g.sell(0));
-    const timber = g.stores[0].timber;
+    const timber = g.store(0).timber;
     try std.testing.expect(g.build(0, road, .road) == null);
-    try std.testing.expectEqual(timber, g.stores[0].timber);
-    try std.testing.expectEqual(@as(u16, 2), g.stores[0].stone);
+    try std.testing.expectEqual(timber, g.store(0).timber);
+    try std.testing.expectEqual(@as(u16, 2), g.store(0).stone);
 }
 
 test "wells spend both materials and cover a growing settlement's daily water need" {
     var g = Game.init();
     const inland = Cell{ .x = 44, .y = 35 };
     try std.testing.expect(g.build(0, .{ .x = 35, .y = 53 }, .well) != null);
-    g.stores[0].stone = 1;
+    g.store(0).stone = 1;
     try std.testing.expect(g.build(0, inland, .well) != null);
-    try std.testing.expectEqual(Game.init().stores[0].timber, g.stores[0].timber);
-    try std.testing.expectEqual(@as(u16, 1), g.stores[0].stone);
-    g.stores[0].stone = 2;
+    try std.testing.expectEqual(Game.init().stockOf(0).timber, g.stockOf(0).timber);
+    try std.testing.expectEqual(@as(u16, 1), g.store(0).stone);
+    g.store(0).stone = 2;
     try std.testing.expect(g.build(0, inland, .well) == null);
-    try std.testing.expectEqual(@as(u16, 17), g.stores[0].timber);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].stone);
+    try std.testing.expectEqual(@as(u16, 17), g.store(0).timber);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).stone);
     g.people = 8;
-    g.stores[0].water = 0;
+    g.store(0).water = 0;
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 8), g.people);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].water);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).water);
 }
 
 test "water shortage draws down supply and costs only one settler even without food" {
     var g = Game.init();
     g.people = 5;
-    g.stores[0].water = 0;
-    g.stores[0].grain = 0;
+    g.store(0).water = 0;
+    g.store(0).grain = 0;
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 4), g.people);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].water);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].grain);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).water);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).grain);
 }
 
 test "the starting ship supply runs out without a well" {
     var g = Game.init();
     g.people = 4;
-    const days = g.stores[0].water / g.dailyDemand(0);
-    g.stores[0].fruit = 30;
+    const days = g.store(0).water / g.dailyDemand(0);
+    g.store(0).fruit = 30;
     try std.testing.expectEqual(@as(u16, 0), g.production(0).water);
     for (0..days) |_| _ = g.tick();
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].water);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).water);
     try std.testing.expectEqual(@as(u16, 4), g.people);
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 3), g.people);
@@ -952,9 +1030,9 @@ test "either island needs two residents and Bali keeps ferry beds free" {
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(crossing_seconds);
-    g.stores[0].venison = 40;
-    g.stores[0].fruit = 40;
-    g.stores[1] = .{ .timber = 6, .grain = 20, .venison = 20, .fruit = 20, .water = 20 };
+    g.store(0).venison = 40;
+    g.store(0).fruit = 40;
+    g.store(1).* = .{ .timber = 6, .grain = 20, .venison = 20, .fruit = 20, .water = 20 };
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 0), g.residents(1));
 
@@ -989,7 +1067,7 @@ test "islands consume and produce supplies locally" {
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(crossing_seconds);
-    g.stores[1] = .{ .timber = 12, .grain = 10 };
+    g.store(1).* = .{ .timber = 12, .grain = 10 };
     try std.testing.expect(g.ferrySettlers(1, 2) == null);
     try std.testing.expectEqual(@as(u16, 0), g.residents(0));
     try std.testing.expect(g.build(0, .{ .x = 39, .y = 44 }, .road) != null);
@@ -997,14 +1075,14 @@ test "islands consume and produce supplies locally" {
     try std.testing.expect(g.build(1, .{ .x = 24, .y = 24 }, .cottage) == null);
     try std.testing.expect(g.build(1, .{ .x = 24, .y = 33 }, .quarry) == null);
     g.paveTo(1, .{ .x = 24, .y = 33 });
-    const alder_water = g.stores[0].water;
-    g.stores[1].water = 0;
+    const alder_water = g.store(0).water;
+    g.store(1).water = 0;
     const shortages = g.tick();
     try std.testing.expectEqual(Game.Shortage.water, shortages[1]);
-    try std.testing.expectEqual(alder_water, g.stores[0].water);
+    try std.testing.expectEqual(alder_water, g.store(0).water);
     try std.testing.expectEqual(@as(u16, 1), g.residents(1));
-    try std.testing.expectEqual(quarry_yield, g.stores[1].stone);
-    try std.testing.expectEqual(starting_stores.stone, g.stores[0].stone);
+    try std.testing.expectEqual(quarry_yield, g.store(1).stone);
+    try std.testing.expectEqual(starting_stores.stone, g.store(0).stone);
 }
 
 test "fruit gathering spreads through harbor roads and neighboring features" {
@@ -1028,7 +1106,7 @@ test "fruit gathering spreads through harbor roads and neighboring features" {
     try std.testing.expectEqual(initial_fruit, g.production(0).fruit);
     const branch = Cell{ .x = 39, .y = 44 };
     const starter = Cell{ .x = 44, .y = 44 };
-    g.stores[0].stone = 40;
+    g.store(0).stone = 40;
     for (branch.x..starter.x) |x| {
         try std.testing.expect(g.build(0, .{ .x = x, .y = branch.y }, .road) == null);
     }
@@ -1041,35 +1119,35 @@ test "fruit gathering spreads through harbor roads and neighboring features" {
     const daily_fruit = g.production(0).fruit;
     try std.testing.expect(daily_fruit > initial_fruit);
 
-    const fruit = g.stores[0].fruit;
-    const meat = g.stores[0].venison;
-    const grain = g.stores[0].grain;
+    const fruit = g.store(0).fruit;
+    const meat = g.store(0).venison;
+    const grain = g.store(0).grain;
     _ = g.tick();
-    try std.testing.expectEqual(fruit + daily_fruit - 1, g.stores[0].fruit);
-    try std.testing.expectEqual(meat - 1, g.stores[0].venison);
-    try std.testing.expectEqual(grain, g.stores[0].grain);
+    try std.testing.expectEqual(fruit + daily_fruit - 1, g.store(0).fruit);
+    try std.testing.expectEqual(meat - 1, g.store(0).venison);
+    try std.testing.expectEqual(grain, g.store(0).grain);
 }
 
 test "grain restarts work and venison prevents gradual weakness" {
     var g = Game.init();
     g.people = 4;
-    g.stores[0].grain = 0;
-    g.stores[0].fruit = 40;
+    g.store(0).grain = 0;
+    g.store(0).fruit = 40;
     try std.testing.expect(g.build(0, .{ .x = 44, .y = 35 }, .well) == null);
     _ = g.tick();
     try std.testing.expect(g.diets[0].missed_grain);
     try std.testing.expectEqual(@as(u16, 0), g.production(0).water);
-    g.stores[0].grain = 30;
+    g.store(0).grain = 30;
     _ = g.tick();
     try std.testing.expect(!g.diets[0].missed_grain);
     try std.testing.expectEqual(well_yield, g.production(0).water);
-    g.stores[0].venison = 0;
+    g.store(0).venison = 0;
     for (1..@as(usize, weakness_limit) + 1) |day| {
         _ = g.tick();
         try std.testing.expectEqual(@as(u16, weakness_limit) - @as(u16, @intCast(day)), g.workforce(0));
     }
     try std.testing.expectEqual(@as(u16, 0), g.production(0).water);
-    g.stores[0].venison = 2;
+    g.store(0).venison = 2;
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 1), g.workforce(0));
 }
@@ -1083,15 +1161,15 @@ test "prolonged fruit shortage causes scurvy and fruit stops it" {
         const cell = grid.cell(i);
         if (site(cell, 0) == .fruit) g.setTile(0, cell, .grove);
     }
-    g.stores[0].fruit = 0;
-    g.stores[0].venison = 30;
+    g.store(0).fruit = 0;
+    g.store(0).venison = 30;
     for (0..scurvy_days - 1) |_| {
         try std.testing.expectEqual(Game.Shortage.diet, g.tick()[0]);
         try std.testing.expectEqual(@as(u16, 4), g.people);
     }
     try std.testing.expectEqual(Game.Shortage.scurvy, g.tick()[0]);
     try std.testing.expectEqual(@as(u16, 3), g.people);
-    g.stores[0].fruit = 2;
+    g.store(0).fruit = 2;
     try std.testing.expectEqual(Game.Shortage.none, g.tick()[0]);
     try std.testing.expectEqual(@as(u8, 0), g.diets[0].days_without_fruit);
 }
@@ -1126,7 +1204,7 @@ test "charter reports the next three goals and remembers past population" {
 test "additional wells cannot push an island past its daily water capacity" {
     var g = Game.init();
     g.people = 1;
-    g.stores[0] = .{ .timber = 100, .stone = 100, .grain = 100, .venison = 100, .fruit = 100 };
+    g.store(0).* = .{ .timber = 100, .stone = 100, .grain = 100, .venison = 100, .fruit = 100 };
     const limit = waterCapacity(0);
     try std.testing.expect(waterCapacity(geography.borneo) > limit);
     const grid = geography.grids[0];
@@ -1139,7 +1217,7 @@ test "additional wells cannot push an island past its daily water capacity" {
         if (wells == limit / well_yield + 2) break;
     } else return error.NotEnoughWellSites;
     _ = g.tick();
-    try std.testing.expectEqual(limit - 1, g.stores[0].water);
+    try std.testing.expectEqual(limit - 1, g.store(0).water);
 }
 
 /// Each island as its first settlers find it: Java as a new game starts,
@@ -1213,7 +1291,7 @@ test "the opening settlers can quarry and connect two quarries near Java's harbo
     for (sites.slice()) |cell| {
         if (connected_quarries == 2) break;
         const path = g.roadPath(0, cell, &buffer) orelse continue;
-        if (path.len * costs[@backingInt(Kind.road)] > g.stores[0].stone) continue;
+        if (path.len * costs[@backingInt(Kind.road)] > g.store(0).stone) continue;
         try std.testing.expect(g.build(0, cell, .quarry) == null);
         try std.testing.expect(!g.connected(0, cell) or path.len == 0);
         for (path) |step| try std.testing.expect(g.build(0, step, .road) == null);
@@ -1221,14 +1299,14 @@ test "the opening settlers can quarry and connect two quarries near Java's harbo
         connected_quarries += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), connected_quarries);
-    const before = g.stores[0].stone;
+    const before = g.store(0).stone;
     _ = g.tick();
-    try std.testing.expect(g.stores[0].stone > before);
+    try std.testing.expect(g.store(0).stone > before);
 }
 
 test "quarries, woodlots and lodges produce only once settlers can reach them" {
     var g = Game.init();
-    g.stores[0] = .{ .timber = 100, .stone = 0, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(0).* = .{ .timber = 100, .stone = 0, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     const quarry = Cell{ .x = 35, .y = 53 };
     const herd = Cell{ .x = 30, .y = 35 };
     try std.testing.expect(g.build(0, quarry, .quarry) == null);
@@ -1238,7 +1316,7 @@ test "quarries, woodlots and lodges produce only once settlers can reach them" {
     try std.testing.expectEqual(@as(u16, 0), idle.stone);
     try std.testing.expectEqual(@as(u16, 0), idle.venison);
     _ = g.tick();
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].stone);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).stone);
     try std.testing.expectEqual(@as(u4, harvest_capacity), g.harvestStatus(0, herd).?.stock);
     g.paveTo(0, quarry);
     g.paveTo(0, herd);

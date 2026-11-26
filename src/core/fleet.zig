@@ -112,7 +112,7 @@ pub fn buildShip(g: *Game, chart: usize, ship: ocean.Ship) ?[:0]const u8 {
     if (g.berthsUsed(chart) >= dock_capacity or g.fleet.count == g.fleet.vessels.len) return "The local dock has no free berth.";
     if (g.residents(chart) < ship.crew() or g.workforce(chart) == 0) return "The island needs enough healthy settlers to build this ship.";
     const cost = shipCost(ship);
-    const local = &g.stores[chart];
+    const local = g.store(chart);
     if (local.timber < cost.timber or local.stone < cost.stone or g.coins < cost.coins)
         return "Building this ship needs more local timber or stone, or more coins.";
     local.timber -= cost.timber;
@@ -144,7 +144,7 @@ pub fn surveyProblem(g: *const Game, id: usize, index: usize) ?[:0]const u8 {
     const rations = g.oceanRations(id, index, 0);
     if (rations.units() > vessel.ship.hold()) return "The ship cannot hold enough provisions for this voyage.";
     if (g.residents(0) < vessel.ship.crew() or g.workforce(0) == 0) return "Java needs enough healthy settlers to crew the expedition.";
-    if (!g.stores[0].includes(rations)) return "Stock more grain, venison, fruit, and water before sailing.";
+    if (!g.stockOf(0).includes(rations)) return "Stock more grain, venison, fruit, and water before sailing.";
     return null;
 }
 
@@ -170,14 +170,14 @@ pub fn launchExpedition(g: *Game, id: usize, index: usize, passengers: u16, load
 fn loadProblem(g: *const Game, id: usize, index: usize, passengers: u16, load: Stores) ?[:0]const u8 {
     const rations = g.oceanRations(id, index, passengers);
     if (rations.units() + load.units() > g.fleet.vessels[id].ship.hold()) return "Cargo and provisions exceed the ship's hold.";
-    if (!g.stores[0].includes(rations)) return "Stock more grain, venison, fruit, and water for the passage.";
+    if (!g.stockOf(0).includes(rations)) return "Stock more grain, venison, fruit, and water for the passage.";
     if (!g.oceanCargoLimit(id, index, passengers).includes(load)) return "There is not enough stock or room for this cargo.";
     return null;
 }
 
 fn embark(g: *Game, id: usize, index: usize, passengers: u16, load: Stores) void {
-    g.stores[0].take(g.oceanRations(id, index, passengers));
-    g.stores[0].take(load);
+    g.store(0).take(g.oceanRations(id, index, passengers));
+    g.store(0).take(load);
     const vessel = &g.fleet.vessels[id];
     vessel.chart = ocean.routes[index].chart;
     vessel.phase = .outbound;
@@ -223,7 +223,7 @@ pub fn returnExpedition(g: *Game, id: usize) ?[:0]const u8 {
     if (vessel.phase != .docked or vessel.chart == 0) return "Choose a ship docked away from Java.";
     if (g.berthsUsed(0) >= dock_capacity) return "Java's dock has no free berth.";
     if (!vessel.return_provisioned) {
-        const local = &g.stores[vessel.chart];
+        const local = g.store(vessel.chart);
         const days: u16 = @intFromFloat(@ceil(vessel.legSeconds() / day_seconds));
         const units = days * dailyUse(vessel.ship.crew());
         const rations = Stores{ .grain = units, .venison = units, .fruit = units, .water = units };

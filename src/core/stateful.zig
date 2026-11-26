@@ -24,10 +24,10 @@ pub const Scenario = enum {
         const random = random_state.random();
         var game = domain.Game.init();
         game.coins = random.intRangeAtMost(u16, 0, 400);
-        game.stores[0] = uniform(random.intRangeAtMost(u16, 0, 300));
+        game.store(0).* = uniform(random.intRangeAtMost(u16, 0, 300));
         if (scenario == .chartered) {
-            game.stores[0] = uniform(random.intRangeAtMost(u16, 100, 600));
-            game.stores[1] = uniform(random.intRangeAtMost(u16, 0, 80));
+            game.store(0).* = uniform(random.intRangeAtMost(u16, 100, 600));
+            game.store(1).* = uniform(random.intRangeAtMost(u16, 0, 80));
             // A second cottage on the first open ground near the harbor.
             const grid = domain.geography.grids[0];
             for (0..grid.area()) |index| {
@@ -63,6 +63,21 @@ fn bridgeCrossing(random: std.Random) usize {
     return random.uintLessThan(usize, domain.crossings.len + 1);
 }
 
+/// A road next to a bridgehead, so random play joins bridges.
+fn bridgeRoad(random: std.Random) Command {
+    const crossing = domain.crossings[random.uintLessThan(usize, domain.crossings.len)];
+    const side = random.uintLessThan(usize, 2);
+    const head = crossing.heads[side];
+    const reach: i32 = 3;
+    const x = @as(i32, @intCast(head.x)) + random.intRangeAtMost(i32, -reach, reach);
+    const y = @as(i32, @intCast(head.y)) + random.intRangeAtMost(i32, -reach, reach);
+    return .{ .build = .{
+        .island = crossing.charts[side],
+        .cell = .{ .x = @intCast(@max(0, x)), .y = @intCast(@max(0, y)) },
+        .kind = .road,
+    } };
+}
+
 /// Mostly an island some bridge reaches, sometimes one none does.
 fn bridgeEnd(random: std.Random) usize {
     const ends = [_]usize{ 0, 1, domain.bridge.madura, 2 };
@@ -86,8 +101,7 @@ pub fn randomCommand(random: std.Random) Command {
             } };
         },
         2 => .{ .build_bridge = bridgeCrossing(random) },
-        3 => .{ .cross_bridge = .{ .crossing = bridgeCrossing(random), .destination = bridgeEnd(random) } },
-        4 => .{ .transfer_stores = .{ .crossing = bridgeCrossing(random), .source = bridgeEnd(random), .cargo = uniform(random.intRangeAtMost(u16, 0, 6)) } },
+        3, 4 => bridgeRoad(random),
         5 => .{ .survey_harbor = .{ .destination = ferryHarbor(random), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 5),
             .cargo = uniform(random.intRangeAtMost(u16, 0, 5)),
@@ -142,7 +156,7 @@ pub const Totals = struct {
 
     pub fn of(game: *const domain.Game) Totals {
         var totals = Totals{ .coins = game.coins, .people = game.people };
-        for (game.stores) |stock| totals.addStores(stock);
+        for (game.stockpiles) |stock| totals.addStores(stock);
         totals.addStores(game.ferry.cargo);
         for (game.vessels()) |vessel| totals.addStores(vessel.cargo);
         return totals;
@@ -229,6 +243,17 @@ pub fn check(before: *const domain.Game, after: *const domain.Game, command: Com
             return .init("settlers walk only built bridges, toward one of their ends", "walker {d} on crossing {d}", .{ index, walker.crossing });
         if (!(walker.elapsed >= 0 and walker.elapsed < walker.walkSeconds()))
             return .init("a walker is part way across", "walker {d}: {d} of {d} seconds", .{ index, walker.elapsed, walker.walkSeconds() });
+    }
+    for (domain.crossings, after.bridges, after.joined, 0..) |crossing, built, joined, index| {
+        const open = built and after.footpathProblem(index) == null;
+        if (joined != open)
+            return .init("a bridge joins its islands exactly when roads reach both ends", "crossing {d}: joined {}, roads {}", .{ index, joined, open });
+        if (joined and !after.linked(crossing.charts[0], crossing.charts[1]))
+            return .init("joined islands share a depot", "crossing {d}", .{index});
+    }
+    for (after.stockpiles, 0..) |pile, chart| {
+        if (after.depot(chart) != chart and !pile.empty())
+            return .init("joined islands keep their goods in one stockpile", "chart {d} holds goods outside depot {d}", .{ chart, after.depot(chart) });
     }
     for (0..domain.settlement_count) |chart| {
         if (after.berthsUsed(chart) > domain.dock_capacity)
@@ -478,7 +503,7 @@ test "property: random command sequences conserve goods and settlers and respect
 fn plantedOracle(_: void, commands: []const Command) bool {
     var game = domain.Game.init();
     game.coins = 0;
-    game.stores[0].grain = 100;
+    game.store(0).grain = 100;
     for (commands) |command| {
         _ = gameplay.apply(&game, command);
         if (game.day > 1 and game.coins >= 20) return true;

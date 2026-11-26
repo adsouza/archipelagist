@@ -82,12 +82,9 @@ const camp_supplies = s.Stores{ .timber = 19, .stone = 4, .grain = 6, .venison =
 const supply_names = [_][:0]const u8{ "Timber", "Stone", "Grain", "Venison", "Fruit", "Water" };
 const Modal = enum { none, restart, bridge, shipyard, manifest };
 const ShipyardTab = enum { ferry, expedition, build };
-/// What the manifest dialog loads: the ferry bound for a harbor, an
-/// expedition on a route, or a bridge transfer from an island.
-const Loading = union(enum) { ferry: Voyage, expedition: Voyage, bridge: Transfer };
-
-/// Stores carried over a bridge from one of its islands.
-const Transfer = struct { crossing: usize, source: usize };
+/// What the manifest dialog loads: the ferry bound for a harbor or an
+/// expedition on a route.
+const Loading = union(enum) { ferry: Voyage, expedition: Voyage };
 
 /// A passage to load: the ferry's destination harbor or a ship's route.
 /// A survey charts the harbor first and lands everyone aboard on arrival.
@@ -147,7 +144,7 @@ const UI = struct {
         // State replaced outside the command boundary starts a new replay segment.
         if (u.journal) |recorder| recorder.snapshot(saved);
         if (u.trace) |trace| trace.note("session", "restored", .{ .day = u.g.day, .fleet_size = u.g.fleet.count, .population = u.g.people, .speed = saved.speed });
-        u.stock_alerts = .init(u.g.stores);
+        u.stock_alerts = .init(&u.g);
         u.island_menu_open = false;
         u.cargo_manifest = .{};
         u.speed = saved.speed;
@@ -287,24 +284,20 @@ const UI = struct {
         }
         if (built) {
             if (u.g.footpathProblem(crossing) != null) return u.bridgeRoads(crossing, names, footer_y);
-            num("Send a settler walking to a free bed on the other island ({d}s across).", .{
+            label("The islands share one store. Settlers walk over by themselves", 309, 276, 19, ink, false);
+            num("when the other side needs hands or spare beds ({d}s across).", .{
                 @as(u32, @intFromFloat(@round(c.walkSeconds()))),
-            }, 309, 276, 19, ink);
+            }, 309, 302, 19, ink);
             for (c.charts, names, 0..) |chart, name, row| {
-                num("{s}   {d} resident{s}   /   {d} places available   /   {d} walking in", .{
-                    name, u.g.residents(chart), if (u.g.residents(chart) == 1) "" else "s", u.g.freeLandingSpace(chart), u.g.walkingTo(chart),
-                }, 309, 310 + a.f(row) * 30, 19, ink);
+                num("{s}   {d} resident{s}   /   {d} free bed{s}   /   {d} walking in", .{
+                    name,                        u.g.residents(chart),                     if (u.g.residents(chart) == 1) "" else "s",
+                    u.g.freeLandingSpace(chart), if (u.g.freeLandingSpace(chart) == 1) "" else "s", u.g.walkingTo(chart),
+                }, 309, 350 + a.f(row) * 30, 19, ink);
             }
-            var caption: [2][64]u8 = undefined;
-            for (c.charts, names, 0..) |chart, name, side| {
-                const x = 309 + a.f(side) * 298;
-                const move = std.fmt.bufPrintSentinel(&caption[side], "Walk 1 to {s}", .{name}, 0) catch unreachable;
-                if (button(move, x, 376, 278, 36)) {
-                    u.modal_note = u.dispatch(.{ .cross_bridge = .{ .crossing = crossing, .destination = chart } }).problem() orelse "A settler set out across the bridge.";
-                }
-                const transfer = std.fmt.bufPrintSentinel(&caption[side], "Transfer stores from {s}", .{name}, 0) catch unreachable;
-                if (button(transfer, x, 424, 278, 36)) u.openManifest(.{ .bridge = .{ .crossing = crossing, .source = chart } });
-            }
+            const pooled = u.g.stockOf(c.charts[0]);
+            num("Shared store   {d} timber   /   {d} stone   /   {d} grain   /   {d} water", .{
+                pooled.timber, pooled.stone, pooled.grain, pooled.water,
+            }, 309, 430, 17, muted);
         } else {
             num("{d} span{s} of {d} allowed. Both islands supply materials and crew.", .{
                 c.spans, if (c.spans == 1) "" else "s", s.max_bridge_spans,
@@ -313,7 +306,7 @@ const UI = struct {
             label("Stone", 657, 333, 16, muted, false);
             label("Crew", 779, 333, 16, muted, false);
             for (c.charts, names, 0..) |chart, name, row| {
-                const local = u.g.stores[chart];
+                const local = u.g.store(chart).*;
                 const y = 368 + a.f(row) * 37;
                 label(name, 309, y, 20, ink, true);
                 num("{d} / {d}", .{ local.timber, c.cost.timber }, 537, y, 19, ink);
@@ -330,7 +323,7 @@ const UI = struct {
                     u.view = .{};
                     if (opened_shipyard) {
                         u.msg = "Bridge open. The shipyard is ready to build exploration ships.";
-                    } else u.setMessage("The {s} bridge is open to settlers and supplies.", .{names[1]});
+                    } else u.setMessage("The {s} bridge stands. Roads to both ends join the islands.", .{names[1]});
                     u.closeModal();
                 }
             }
@@ -345,10 +338,11 @@ const UI = struct {
     /// A built bridge waits for roads from both harbors before settlers can walk over it.
     fn bridgeRoads(u: *UI, crossing: usize, names: [2][:0]const u8, footer_y: f32) void {
         const c = s.crossings[crossing];
-        label("Settlers walk over the bridge once a road from each harbor reaches it.", 309, 276, 19, ink, false);
+        label("Lay a road from each harbor to the bridge. Then the", 309, 276, 19, ink, false);
+        label("islands share one store and settlers walk across.", 309, 302, 19, ink, false);
         var caption: [2][64]u8 = undefined;
         for (c.charts, names, 0..) |chart, name, side| {
-            const y = 316 + a.f(side) * 52;
+            const y = 342 + a.f(side) * 52;
             var buffer: [s.geography.max_grid_area]s.Cell = undefined;
             const path = u.g.bridgeRoadPath(crossing, chart, &buffer);
             if (path) |tiles| {
@@ -360,7 +354,7 @@ const UI = struct {
                 const stone = tiles.len * s.costs[@backingInt(s.Kind.road)];
                 const pave = std.fmt.bufPrintSentinel(&caption[side], "Lay road   /   {d} stone", .{stone}, 0) catch unreachable;
                 if (button(pave, 647, y, 238, 36)) {
-                    if (u.g.stores[chart].stone < stone) {
+                    if (u.g.store(chart).stone < stone) {
                         u.playCue(.denied);
                         u.modal_note = "The island needs more stone for this road.";
                         return;
@@ -373,7 +367,7 @@ const UI = struct {
                         }
                     }
                     u.playCue(.build);
-                    u.modal_note = if (u.g.footpathProblem(crossing) == null) "The road reaches the bridge. Settlers can walk across." else "The road reaches the bridge on this side.";
+                    u.modal_note = if (u.g.footpathProblem(crossing) == null) "The islands are joined: they share one store and settlers walk across." else "The road reaches the bridge on this side.";
                     return;
                 }
             } else num("{s}   no road can reach the bridge", .{name}, 309, y + 7, 19, muted);
@@ -396,7 +390,6 @@ const UI = struct {
         u.boarding = switch (passage) {
             .ferry => |voyage| u.g.ferryBoardingLimit(voyage.to, voyage.survey),
             .expedition => |voyage| @min(2, u.shipSettlerLimit(voyage)),
-            .bridge => 0,
         };
         switch (passage) {
             .ferry => |voyage| u.cargo_manifest = u.g.ferryCampSupplies(voyage.to, u.boarding, voyage.survey),
@@ -404,7 +397,6 @@ const UI = struct {
                 const chart = s.ocean.routes[voyage.to].chart;
                 if (u.boarding > 0 and u.g.residents(chart) == 0) u.cargo_manifest = camp_supplies;
             },
-            .bridge => {},
         }
     }
 
@@ -441,53 +433,43 @@ const UI = struct {
         const loading = u.loading;
         const source = switch (loading) {
             .ferry => u.g.mooredChart() orelse u.g.ferry.origin,
-            .bridge => |transfer| transfer.source,
             .expedition => 0,
         };
         const target = switch (loading) {
             .ferry => |voyage| voyage.to,
-            .bridge => |transfer| s.crossings[transfer.crossing].across(source),
             .expedition => |voyage| s.ocean.routes[voyage.to].chart,
         };
         const survey = switch (loading) {
             .ferry, .expedition => |voyage| voyage.survey,
-            .bridge => false,
         };
         const hold: u32 = switch (loading) {
             .ferry => s.ferry_hold,
             .expedition => u.g.fleet.vessels[u.ship_id].ship.hold(),
-            .bridge => std.math.maxInt(u32),
         };
 
         a.rect(194, 76, 812, 608, paper);
         a.rect(194, 76, 812, 6, gold);
-        label(if (loading == .bridge) "Bridge stores" else if (survey) "Survey and settle" else "Load and board", 226, 102, 35, ink, true);
+        label(if (survey) "Survey and settle" else "Load and board", 226, 102, 35, ink, true);
         num("{s} to {s}   /   {s}", .{
             s.chart_names[source], s.chart_names[target],
             switch (loading) {
                 .ferry => "Harbor ferry",
                 .expedition => u.g.fleet.vessels[u.ship_id].ship.name(),
-                .bridge => "Overland transfer",
             },
         }, 226, 153, 21, ink);
-        if (loading != .bridge) {
-            const limit = switch (loading) {
-                .ferry => |voyage| u.g.ferryBoardingLimit(target, voyage.survey),
-                .expedition => |voyage| u.shipSettlerLimit(voyage),
-                .bridge => unreachable,
-            };
-            label("Settlers aboard", 226, 192, 20, ink, false);
-            u.slider(0, 203, &u.boarding, limit);
-        }
+        const boarding_limit = switch (loading) {
+            .ferry => |voyage| u.g.ferryBoardingLimit(target, voyage.survey),
+            .expedition => |voyage| u.shipSettlerLimit(voyage),
+        };
+        label("Settlers aboard", 226, 192, 20, ink, false);
+        u.slider(0, 203, &u.boarding, boarding_limit);
         const rations: s.Stores = switch (loading) {
             .ferry => u.g.ferryProvisions(source, target, u.boarding),
             .expedition => |voyage| u.g.oceanRations(u.ship_id, voyage.to, u.boarding),
-            .bridge => .{},
         };
         const limits = switch (loading) {
             .ferry => u.g.ferryCargoLimit(target, u.boarding),
             .expedition => |voyage| u.g.oceanCargoLimit(u.ship_id, voyage.to, u.boarding),
-            .bridge => |transfer| u.g.bridgeCargoLimit(transfer.crossing, source),
         };
         const room = hold -| rations.units();
         var remaining = room;
@@ -498,9 +480,7 @@ const UI = struct {
             remaining -= amount.*;
         }
         a.rect(226, 283, 747, 1, 0xcac9b4);
-        if (loading == .bridge) {
-            label("Choose supplies to carry across the bridge.", 226, 225, 18, muted, false);
-        } else if (survey and loading == .expedition) {
+        if (survey and loading == .expedition) {
             num("Survey rations   {d} each   /   settlers and supplies land once {s} is charted", .{ rations.grain, s.chart_names[target] }, 226, 226, 17, muted);
         } else if (survey) {
             num("Voyage rations   {d} grain or venison   /   20 coins   /   settlers land once {s} is charted", .{ rations.units(), s.chart_names[target] }, 226, 226, 17, muted);
@@ -518,18 +498,16 @@ const UI = struct {
             u.slider(i + 1, y, amount, limit);
             a.rect(226, y + 22, 747, 1, 0xd9d4c1);
         }
-        if (loading != .bridge) {
-            num("Hold   {d} / {d} units   /   {d} cargo + {d} rations", .{
-                u.cargo_manifest.units() + rations.units(), hold, u.cargo_manifest.units(), rations.units(),
-            }, 226, 253, 18, ink);
-        }
+        num("Hold   {d} / {d} units   /   {d} cargo + {d} rations", .{
+            u.cargo_manifest.units() + rations.units(), hold, u.cargo_manifest.units(), rations.units(),
+        }, 226, 253, 18, ink);
         if (u.modal_note) |note| label(note, 226, 573, 17, 0x8b4235, false);
         if (button("Back", 226, 623, 114, 37) or r.isKeyPressed(.escape)) {
-            u.modal = if (loading == .bridge) .bridge else .shipyard;
+            u.modal = .shipyard;
             u.modal_note = null;
             return;
         }
-        const caption = if (loading == .bridge) "Transfer stores" else if (survey) "Launch survey" else "Launch voyage";
+        const caption = if (survey) "Launch survey" else "Launch voyage";
         if (button(caption, 808, 623, 165, 37)) {
             const manifest: gameplay.Manifest = .{ .settlers = u.boarding, .cargo = u.cargo_manifest };
             const failure = switch (loading) {
@@ -541,7 +519,6 @@ const UI = struct {
                     .{ .survey_island = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }
                 else
                     .{ .send_expedition = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }).problem(),
-                .bridge => |transfer| u.dispatch(.{ .transfer_stores = .{ .crossing = transfer.crossing, .source = source, .cargo = u.cargo_manifest } }).problem(),
             };
             if (failure) |problem| {
                 u.playCue(.denied);
@@ -552,12 +529,9 @@ const UI = struct {
             switch (loading) {
                 .ferry => u.view = .{},
                 .expedition => |voyage| u.view.showExpedition(voyage.to),
-                .bridge => {},
             }
-            u.playCue(if (loading == .bridge) .trade else .sail);
-            if (loading == .bridge) {
-                u.setMessage("Supplies crossed the bridge to {s}.", .{s.chart_names[target]});
-            } else if (survey) {
+            u.playCue(.sail);
+            if (survey) {
                 u.setMessage("The {s} is sailing to survey {s}.", .{ if (loading == .ferry) "ferry" else "survey ship", s.chart_names[target] });
             } else {
                 u.setMessage("The {s} has set sail for {s}.", .{ if (loading == .ferry) "ferry" else "expedition ship", s.chart_names[target] });
@@ -669,7 +643,7 @@ const UI = struct {
             label("Complete the Bali landing, lighthouse, and bridge to unlock ship construction.", 211, 300, 18, muted, false);
             return;
         }
-        const stock = u.g.stores[chart];
+        const stock = u.g.store(chart).*;
         const full = u.g.berthsUsed(chart) >= s.dock_capacity;
         num("On hand   {d} timber   /   {d} stone   /   {d} coins", .{ stock.timber, stock.stone, u.g.coins }, 211, 284, 16, muted);
         for ([_]s.ocean.Ship{ .brig, .barque }, 0..) |ship, row| {
@@ -895,7 +869,12 @@ const UI = struct {
         label(game_title, 75, 17, 38, paper, true);
 
         a.rect(237, 6, 452, 72, 0x2d4b49);
-        label("ISLAND STORES", 250, 15, 11, 0xc4d4bf, false);
+        if (ledger.shared_with) |other| {
+            var name: [32]u8 = undefined;
+            var heading: [64]u8 = undefined;
+            const other_name = std.ascii.upperString(&name, s.chart_names[other]);
+            label(std.fmt.bufPrintSentinel(&heading, "ISLAND STORES   SHARED WITH {s}", .{other_name}, 0) catch unreachable, 250, 15, 11, 0xc4d4bf, false);
+        } else label("ISLAND STORES", 250, 15, 11, 0xc4d4bf, false);
         const field = island_field;
         const hot = r.checkCollisionPointRec(mouse, field);
         a.rect(field.x, field.y, field.width, field.height, if (hot or u.island_menu_open) 0xd4dfc8 else paper);
@@ -908,7 +887,7 @@ const UI = struct {
 
         const resources = [_][:0]const u8{ "TIMBER", "STONE", "GRAIN", "VENISON", "FRUIT", "WATER" };
         const local = ledger.stock;
-        const demand = ledger.daily_demand;
+        const demand = ledger.shared_demand;
         inline for (resources, s.store_fields, 0..) |name, resource, i| {
             const x = 250 + a.f(i) * 73;
             if (i > 0) a.rect(x - 11, 39, 1, 33, 0x49645e);
@@ -1281,7 +1260,7 @@ fn run(process: std.process.Init, store: save_store.Store, trace: ?*diagnostics.
     r.setTextureFilter(serif.texture, .bilinear);
     if (trace) |active| active.note("presentation", "assets_ready", .{ .fonts = 2 });
     var u = UI{ .effects = .init(), .store = store, .trace = trace, .journal = journal };
-    u.stock_alerts = .init(u.g.stores);
+    u.stock_alerts = .init(&u.g);
     u.view.showIsland(0);
     defer u.effects.deinit();
     if (trace) |active| {

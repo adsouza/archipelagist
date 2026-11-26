@@ -101,7 +101,7 @@ test "housing eight settlers is remembered after the population falls" {
     try std.testing.expectEqual(@as(?Goal, .house_settlers), nextGoals(&g)[0]);
     g.people = 8;
     try std.testing.expect(nextGoals(&g)[0] != .house_settlers);
-    g.stores[0] = .{ .grain = 200, .venison = 200, .fruit = 200, .water = 200 };
+    g.store(0).* = .{ .grain = 200, .venison = 200, .fruit = 200, .water = 200 };
     _ = g.tick();
     try std.testing.expect(g.charter.housed_eight);
     g.people = 2;

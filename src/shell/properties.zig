@@ -23,14 +23,14 @@ fn rejectionCase(seed: u64) !void {
     var random_state = std.Random.DefaultPrng.init(seed);
     const random = random_state.random();
     var game = domain.Game.init();
-    game.stores[0] = stock(random.intRangeAtMost(u16, 0, 5));
+    game.store(0).* = stock(random.intRangeAtMost(u16, 0, 5));
     game.coins = random.intRangeAtMost(u16, 0, 19);
 
     const home = domain.quay(0);
     var rejected_state: domain.Game = undefined;
     const command: gameplay.Command = .{ .build = .{ .island = 0, .cell = home, .kind = .road } };
     // Give the player enough stone to isolate the occupancy invariant.
-    game.stores[0].stone = 20;
+    game.store(0).stone = 20;
     const result = gameplay.transition(&game, &rejected_state, command);
     try std.testing.expect(result == .denied);
     try std.testing.expectEqual(domain.Kind.port, game.tileAt(0, home));
@@ -42,12 +42,11 @@ fn rejectionCase(seed: u64) !void {
         1 => std.math.nan(f32),
         else => domain.day_seconds + 0.001 + random.float(f32) * 100,
     } });
-    try rejected(&game, .{ .cross_bridge = .{ .crossing = 0, .destination = domain.settlement_count + random.intRangeAtMost(usize, 1, 100) } });
     try rejected(&game, .{ .build_bridge = domain.crossings.len + random.intRangeAtMost(usize, 0, 100) });
 
     game.ferry.surveyed = true;
     game.openPort(1);
-    game.stores[1].timber = 80;
+    game.store(1).timber = 80;
     const inland = domain.geography.grids[1];
     for (0..inland.area()) |index| {
         const cell = inland.cell(index);
@@ -82,29 +81,29 @@ fn settlementCase(seed: u64) !void {
     const route = domain.ocean.routes[route_index];
     game.fleet.charted[route_index] = true;
     game.openPort(route.chart);
-    game.stores[0] = stock(600);
-    game.stores[route.chart] = stock(random.intRangeAtMost(u16, 0, 200));
+    game.store(0).* = stock(600);
+    game.store(route.chart).* = stock(random.intRangeAtMost(u16, 0, 200));
 
     const hull = domain.shipCost(.brig);
     for (0..domain.dock_capacity) |id| {
-        const origin = game.stores[0];
+        const origin = game.store(0).*;
         const coins = game.coins;
         try std.testing.expect(gameplay.apply(&game, .{ .build_ship = .{ .island = 0, .hull = .brig } }) == .applied);
         try std.testing.expectEqual(id + 1, game.fleet.count);
-        try std.testing.expectEqual(origin.timber - hull.timber, game.stores[0].timber);
-        try std.testing.expectEqual(origin.stone - hull.stone, game.stores[0].stone);
+        try std.testing.expectEqual(origin.timber - hull.timber, game.store(0).timber);
+        try std.testing.expectEqual(origin.stone - hull.stone, game.store(0).stone);
         try std.testing.expectEqual(coins - hull.coins, game.coins);
     }
     try rejected(&game, .{ .build_ship = .{ .island = 0, .hull = .brig } });
 
-    const initial_stock = game.stores[route.chart];
+    const initial_stock = game.store(route.chart).*;
     var expected_arrival = initial_stock;
     var expected_passengers: u16 = 0;
     for (0..domain.dock_capacity) |id| {
         const passengers = random.intRangeAtMost(u16, 1, 2);
         const cargo = stock(random.intRangeAtMost(u16, 1, 6));
         const provisions = game.oceanRations(id, route_index, passengers);
-        var expected_source = game.stores[0];
+        var expected_source = game.store(0).*;
         expected_source.take(provisions);
         expected_source.take(cargo);
         expected_arrival.add(cargo);
@@ -115,8 +114,8 @@ fn settlementCase(seed: u64) !void {
             .manifest = .{ .settlers = passengers, .cargo = cargo },
         } });
         try std.testing.expect(receipt == .applied);
-        try std.testing.expectEqualDeep(expected_source, game.stores[0]);
-        try std.testing.expectEqualDeep(initial_stock, game.stores[route.chart]);
+        try std.testing.expectEqualDeep(expected_source, game.store(0).*);
+        try std.testing.expectEqualDeep(initial_stock, game.store(route.chart).*);
         try std.testing.expectEqual(expected_passengers, game.reservedBeds(route.chart));
         try std.testing.expectEqual(id + 1, game.berthsUsed(route.chart));
         try std.testing.expectEqual(@as(u16, 8), game.people);
@@ -141,11 +140,11 @@ fn settlementCase(seed: u64) !void {
     }
     try std.testing.expectEqual(expected_passengers, reported);
     try std.testing.expectEqual(expected_passengers, restored.residents(route.chart));
-    try std.testing.expectEqualDeep(expected_arrival, restored.stores[route.chart]);
+    try std.testing.expectEqualDeep(expected_arrival, restored.store(route.chart).*);
     try std.testing.expectEqual(@as(u16, 0), restored.reservedBeds(route.chart));
     const idle = gameplay.advanceVoyages(&restored, 2 * route.leg_seconds);
     try std.testing.expectEqual(@as(usize, 0), idle.len);
-    try std.testing.expectEqualDeep(expected_arrival, restored.stores[route.chart]);
+    try std.testing.expectEqualDeep(expected_arrival, restored.store(route.chart).*);
 }
 
 test "property: generated parallel voyages reserve capacity and conserve cargo and population across saves" {
@@ -160,8 +159,8 @@ fn waterCase(seed: u64) !void {
     const random = random_state.random();
     var game = domain.Game.init();
     game.people = 1;
-    game.stores[0] = stock(200);
-    game.stores[0].water = 0;
+    game.store(0).* = stock(200);
+    game.store(0).water = 0;
     game.diets[0].meat_deficit = random.intRangeAtMost(u8, 0, domain.weakness_limit);
     const cap = domain.waterCapacity(0);
     const count = cap / domain.well_yield + random.intRangeAtMost(u16, 1, 6);
@@ -180,7 +179,7 @@ fn waterCase(seed: u64) !void {
     } else return error.NotEnoughWellSites;
     const before = queries.ledger(&game, 0);
     _ = gameplay.apply(&game, .{ .advance = gameplay.untilNextDay(&game) });
-    try std.testing.expectEqual(before.production.water -| before.daily_demand, game.stores[0].water);
+    try std.testing.expectEqual(before.production.water -| before.daily_demand, game.store(0).water);
 }
 
 test "property: extra wells respect the cap at every generated workforce size" {
@@ -236,7 +235,7 @@ fn resourceCase(seed: u64) !void {
     const path = game.roadPath(chart, cell, &buffer) orelse return error.TestUnexpectedResult;
     try std.testing.expect(path.len <= cost);
     try std.testing.expect(reached == (path.len == 0));
-    game.stores[chart].stone = @intCast(path.len);
+    game.store(chart).stone = @intCast(path.len);
     for (path) |step| try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = step, .kind = .road } }) == .applied);
     try std.testing.expect(game.connected(chart, cell));
     try std.testing.expect(output(&game, chart, kind) > 0);
@@ -279,7 +278,7 @@ fn clockCase(seed: u64) !void {
     var random_state = std.Random.DefaultPrng.init(seed);
     const random = random_state.random();
     var game = domain.Game.init();
-    game.stores[0] = stock(500);
+    game.store(0).* = stock(500);
     var total: f64 = 0;
     var days: u32 = 0;
     for (0..random.intRangeAtMost(usize, 20, 120)) |_| {
@@ -321,12 +320,14 @@ fn randomCommand(random: std.Random, game: *const domain.Game) gameplay.Command 
             break :blk .{ .build = .{ .island = island, .cell = cell, .kind = kinds[random.uintLessThan(usize, kinds.len)] } };
         },
         2 => .{ .build_bridge = random.uintLessThan(usize, domain.crossings.len + 1) },
-        3 => .{ .cross_bridge = .{ .crossing = random.uintLessThan(usize, domain.crossings.len + 1), .destination = random.uintLessThan(usize, 3) } },
-        4 => .{ .transfer_stores = .{
-            .crossing = random.uintLessThan(usize, domain.crossings.len + 1),
-            .source = random.uintLessThan(usize, 3),
-            .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
-        } },
+        3, 4 => blk: {
+            // A road beside a bridgehead, so random play joins bridges.
+            const crossing = domain.crossings[random.uintLessThan(usize, domain.crossings.len)];
+            const side = random.uintLessThan(usize, 2);
+            const head = crossing.heads[side];
+            const cell = domain.Cell{ .x = (head.x + random.uintLessThan(usize, 7)) -| 3, .y = (head.y + random.uintLessThan(usize, 7)) -| 3 };
+            break :blk .{ .build = .{ .island = crossing.charts[side], .cell = cell, .kind = .road } };
+        },
         5 => .{ .survey_harbor = .{ .destination = random.uintLessThan(usize, 3), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 5),
             .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
@@ -358,11 +359,11 @@ fn journalCase(seed: u64) !void {
     const random = random_state.random();
     var game = domain.Game.init();
     game.coins = random.intRangeAtMost(u16, 0, 400);
-    game.stores[0] = stock(random.intRangeAtMost(u16, 0, 300));
+    game.store(0).* = stock(random.intRangeAtMost(u16, 0, 300));
     if (seed % 2 == 0) {
         // Start half the cases with the opening charter complete so the
         // shipyard, surveys, and expeditions are reachable.
-        game.stores[0] = stock(random.intRangeAtMost(u16, 100, 600));
+        game.store(0).* = stock(random.intRangeAtMost(u16, 100, 600));
         try std.testing.expect(game.build(0, .{ .x = 39, .y = 39 }, .cottage) == null);
         game.people = 8;
         game.ferry.surveyed = true;
@@ -434,7 +435,7 @@ fn harvestCase(seed: u64) !void {
     const random = random_state.random();
     var game = domain.Game.init();
     game.people = 1;
-    game.stores[0] = stock(random.intRangeAtMost(u16, 72, 200));
+    game.store(0).* = stock(random.intRangeAtMost(u16, 72, 200));
     const woods = domain.Cell{ .x = 30, .y = 30 };
     const herd = domain.Cell{ .x = 30, .y = 35 };
     try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = 0, .cell = woods, .kind = .grove } }) == .applied);
@@ -451,8 +452,8 @@ fn harvestCase(seed: u64) !void {
         try std.testing.expect(result == .advanced and result.advanced.day != null);
         try std.testing.expectEqual(game.day + 1, next.day);
         try std.testing.expectEqualSlices(u8, &before, &save.encode(game));
-        try std.testing.expectEqual(game.stores[0].timber + ledger.production.timber, next.stores[0].timber);
-        try std.testing.expectEqual(game.stores[0].venison + ledger.production.venison - ledger.daily_demand, next.stores[0].venison);
+        try std.testing.expectEqual(game.store(0).timber + ledger.production.timber, next.store(0).timber);
+        try std.testing.expectEqual(game.store(0).venison + ledger.production.venison - ledger.daily_demand, next.store(0).venison);
         const wood = next.harvestStatus(0, woods).?;
         const deer = next.harvestStatus(0, herd).?;
         try std.testing.expect(wood.stock <= domain.harvest_capacity and deer.stock <= domain.harvest_capacity);

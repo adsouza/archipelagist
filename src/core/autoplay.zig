@@ -63,7 +63,7 @@ pub const Player = struct {
     /// Lays the roads that join `cell` to the harbor, if the island can pay for them.
     fn affordablePath(p: *const Player, chart: usize, cell: Cell, buffer: []Cell) ?[]Cell {
         const path = p.game.roadPath(chart, cell, buffer) orelse return null;
-        if (path.len * domain.costs[@backingInt(Kind.road)] > p.game.stores[chart].stone) return null;
+        if (path.len * domain.costs[@backingInt(Kind.road)] > p.game.stockOf(chart).stone) return null;
         return path;
     }
 
@@ -137,7 +137,7 @@ pub const Player = struct {
         var buffer: [256]Cell = undefined;
         const path = p.affordablePath(chart, cell, &buffer).?;
         const roads_needed = path.len;
-        if (p.game.stores[chart].timber < domain.costs[@backingInt(kind)]) return false;
+        if (p.game.store(chart).timber < domain.costs[@backingInt(kind)]) return false;
         if (!p.build(chart, cell, kind)) return false;
         // Building the producer may already join it to a neighbor.
         const rest = p.game.roadPath(chart, cell, &buffer) orelse return true;
@@ -162,7 +162,7 @@ pub const Player = struct {
     }
 
     fn timber(p: *const Player, chart: usize) u16 {
-        return p.game.stores[chart].timber;
+        return p.game.stockOf(chart).timber;
     }
 
     /// One improvement for an island's food, water and materials, most urgent first.
@@ -198,7 +198,7 @@ pub const Player = struct {
     /// Sells grain beyond a few days' reserve to fund surveys and the lighthouse.
     fn trade(p: *Player, chart: usize) void {
         const reserve = 6 + 4 * p.game.dailyDemand(chart);
-        while (p.game.stores[chart].grain >= reserve + 6 and p.game.coins < 60) {
+        while (p.game.store(chart).grain >= reserve + 6 and p.game.coins < 60) {
             if (!p.act(.{ .export_grain = chart })) break;
             p.log.note(&p.game, "sold grain on {s}, {d} coins", .{ domain.chart_names[chart], p.game.coins });
         }
@@ -219,9 +219,9 @@ pub const Player = struct {
         const lighthouse: u16 = if (g.charter.won) 0 else domain.costs[@backingInt(Kind.light)];
         const bridge = if (g.bridges[0]) Stores{} else domain.bridge_cost;
         const building: u16 = 16;
-        wants.timber = (lighthouse + bridge.timber + building) -| g.stores[bali].timber;
+        wants.timber = (lighthouse + bridge.timber + building) -| g.stockOf(bali).timber;
         const road = p.bridgeRoad(bali) * domain.costs[@backingInt(Kind.road)];
-        wants.stone = (bridge.stone + domain.well_stone + road) -| g.stores[bali].stone;
+        wants.stone = (bridge.stone + domain.well_stone + road) -| g.stockOf(bali).stone;
         return wants;
     }
 
@@ -245,7 +245,8 @@ pub const Player = struct {
         if (survey) {
             if (moored != java or g.coins < 20 or g.people < 4) return;
         } else {
-            if (g.bridges[domain.strait] and g.footpathProblem(domain.strait) == null) return p.overland();
+            // Joined islands share their stores and settlers walk over by themselves.
+            if (g.linked(java, bali)) return;
             if (moored == bali) {
                 if (p.act(.{ .sail_ferry = java })) p.log.note(g, "ferry returns to Java", .{});
                 return;
@@ -287,20 +288,6 @@ pub const Player = struct {
         return .{ .timber = 14, .stone = 6, .grain = 4 * need + 2, .venison = 4 * need, .fruit = 4 * need, .water = 4 * need };
     }
 
-    /// Once the bridge stands, settlers and supplies cross overland.
-    fn overland(p: *Player) void {
-        const g = &p.game;
-        const wants = p.baliWants(0);
-        const keep = p.javaKeeps();
-        const limits = g.bridgeCargoLimit(domain.strait, java);
-        var load = Stores{};
-        inline for (domain.store_fields) |name| {
-            @field(load, name) = @min(@field(wants, name), @field(limits, name) -| @field(keep, name));
-        }
-        if (!load.empty() and p.act(.{ .transfer_stores = .{ .crossing = domain.strait, .source = java, .cargo = load } }))
-            p.log.note(g, "carried {any} over the bridge", .{load});
-    }
-
     fn charter(p: *Player) void {
         const g = &p.game;
         if (!g.bridges[domain.strait] and g.bridgeProblem(domain.strait) == null and p.act(.{ .build_bridge = domain.strait })) p.log.note(g, "bridge built", .{});
@@ -309,7 +296,7 @@ pub const Player = struct {
             for ([_]usize{ java, bali }) |chart| {
                 var buffer: [domain.geography.max_grid_area]Cell = undefined;
                 const path = g.bridgeRoadPath(domain.strait, chart, &buffer) orelse continue;
-                if (path.len * domain.costs[@backingInt(Kind.road)] > g.stores[chart].stone) continue;
+                if (path.len * domain.costs[@backingInt(Kind.road)] > g.store(chart).stone) continue;
                 p.pave(chart, path);
             }
         }

@@ -148,11 +148,12 @@ fn valid(g: *const s.Game) bool {
     for (s.crossings, g.bridges) |crossing, built| {
         if (built and !(g.islandOpen(crossing.charts[0]) and g.islandOpen(crossing.charts[1]))) return false;
     }
+    if (!validPools(g)) return false;
     for (1..s.settlement_count) |chart| {
         const open = g.islandOpen(chart);
         if (open and g.tileAt(chart, s.quay(chart)) != .port) return false;
         if (!open) {
-            if (g.residents(chart) > 0 or !g.stores[chart].empty()) return false;
+            if (g.residents(chart) > 0 or !g.stockOf(chart).empty()) return false;
             for (g.tilesOn(chart)) |tile| {
                 if (tile.kind != .empty) return false;
             }
@@ -169,6 +170,18 @@ fn valid(g: *const s.Game) bool {
         if (vessel.ship == .none) return false;
     }
     return validFleet(g);
+}
+
+/// A bridge is joined exactly when it stands and roads reach both ends,
+/// and joined islands keep their goods only in their depot's stockpile.
+fn validPools(g: *const s.Game) bool {
+    for (g.bridges, g.joined, 0..) |built, joined, index| {
+        if (joined != (built and g.footpathProblem(index) == null)) return false;
+    }
+    for (g.stockpiles, 0..) |pile, chart| {
+        if (g.depot(chart) != chart and !pile.empty()) return false;
+    }
+    return true;
 }
 
 /// Every walker is part way across a built bridge, bound for one of its
@@ -244,7 +257,7 @@ fn validFleet(g: *const s.Game) bool {
         if (g.berthsUsed(chart) > s.dock_capacity) return false;
         if (@as(u32, g.residents(chart)) + g.reservedBeds(chart) > g.landingCapacity(chart)) return false;
         inline for (s.store_fields) |name| {
-            if (@field(arriving[chart], name) > std.math.maxInt(u16) - @field(g.stores[chart], name)) return false;
+            if (@field(arriving[chart], name) > std.math.maxInt(u16) - @field(g.stockOf(chart), name)) return false;
         }
     }
     return true;
@@ -311,9 +324,9 @@ test "the last settler's death ends the charter and freezes a voyage across relo
     g.people = 1;
     g.coins = 20;
     try surveyFerryAndReturn(g);
-    try std.testing.expect(g.sendCargo(0, 0, .{ .timber = 1 }) == null);
+    try std.testing.expect(g.sendFerry(1, 0, .{ .timber = 1 }) == null);
     g.advanceShip(2);
-    g.stores[0].water = 0;
+    g.store(0).water = 0;
     try std.testing.expectEqual(s.Game.Shortage.water, g.tick()[0]);
     try std.testing.expect(g.isOver());
 
@@ -330,7 +343,7 @@ test "settlers aboard keep the charter alive when every island is empty" {
     g.coins = 20;
     try surveyFerryAndReturn(&g);
     try std.testing.expect(g.sendFerry(1, 1, .{ .water = 3 }) == null);
-    g.stores[0].water = 0;
+    g.store(0).water = 0;
     try std.testing.expectEqual(s.Game.Shortage.water, g.tick()[0]);
     for (0..s.settlement_count) |chart| try std.testing.expectEqual(@as(u16, 0), g.residents(chart));
     try std.testing.expect(!g.isOver());
@@ -361,7 +374,7 @@ test "resume survey and sailings from either port" {
     try std.testing.expectEqual(@as(?usize, 0), g.mooredChart());
     for ([_]usize{ 1, 0 }) |destination| {
         if (destination == 1) {
-            try std.testing.expect(g.sendCargo(0, 0, .{ .timber = 1 }) == null);
+            try std.testing.expect(g.sendFerry(1, 0, .{ .timber = 1 }) == null);
         } else {
             try std.testing.expect(g.sailFerry(0) == null);
         }
@@ -378,12 +391,12 @@ test "ferry reserves housing and restores a passenger at sea" {
     var g = s.Game.init();
     g.coins = 20;
     try surveyFerryAndReturn(&g);
-    g.stores[0].grain = 0;
-    g.stores[0].venison = 0;
+    g.store(0).grain = 0;
+    g.store(0).venison = 0;
     try std.testing.expect(g.ferrySettlers(1, 1) != null);
-    g.stores[0].grain = s.starting_stores.grain;
+    g.store(0).grain = s.starting_stores.grain;
     try std.testing.expectEqual(@as(?usize, 0), g.mooredChart());
-    g.stores[1] = .{ .timber = 12, .grain = 10, .water = 10 };
+    g.store(1).* = .{ .timber = 12, .grain = 10, .water = 10 };
     try std.testing.expect(g.build(0, s.Cell{ .x = 39, .y = 44 }, .road) == null);
     try std.testing.expect(g.ferrySettlers(1, 1) == null);
     try std.testing.expectEqual(@as(u16, 1), g.residents(0));
@@ -410,7 +423,7 @@ test "a group can ferry both ways and resume mid-crossing" {
     g.people = 8;
     g.coins = 20;
     try surveyFerryAndReturn(&g);
-    g.stores[1] = .{ .timber = 12, .grain = 10, .water = 10 };
+    g.store(1).* = .{ .timber = 12, .grain = 10, .water = 10 };
     try std.testing.expectEqual(@as(u16, 4), g.ferryLimit(1));
     try std.testing.expect(g.ferrySettlers(1, 5) != null);
     try std.testing.expect(g.ferrySettlers(1, 4) == null);
@@ -453,40 +466,40 @@ test "cargo resumes at sea and local stock pays for the bridge on both shores" {
 
     var load = s.Stores{ .timber = 12, .stone = 4, .grain = 7, .fruit = 4, .water = 10 };
     const before_load = encode(g);
-    try std.testing.expect(g.sendCargo(0, 0, load) != null);
+    try std.testing.expect(g.sendFerry(1, 0, load) != null);
     try std.testing.expectEqual(before_load, encode(g));
     load.grain = 2;
     try std.testing.expectEqual(s.ferry_hold, load.units());
-    try std.testing.expect(g.sendCargo(0, 0, load) == null);
-    try std.testing.expectEqual(@as(u16, 10), g.stores[0].water);
-    try std.testing.expect(g.stores[1].empty());
+    try std.testing.expect(g.sendFerry(1, 0, load) == null);
+    try std.testing.expectEqual(@as(u16, 10), g.store(0).water);
+    try std.testing.expect(g.store(1).empty());
     g.advanceShip(4);
     g = decode(&encode(g)).?;
     try std.testing.expectEqualDeep(load, g.ferry.cargo);
     g.advanceShip(5);
     try std.testing.expect(g.ferry.cargo.empty());
-    try std.testing.expectEqualDeep(load, g.stores[1]);
+    try std.testing.expectEqualDeep(load, g.store(1).*);
 
     const cottage = s.Cell{ .x = 24, .y = 24 };
     try std.testing.expectEqualStrings("Bring at least one settler to this island before building.", g.build(1, cottage, .cottage).?);
-    try std.testing.expectEqualDeep(load, g.stores[1]);
+    try std.testing.expectEqualDeep(load, g.store(1).*);
     try std.testing.expectEqual(s.Kind.empty, g.tileAt(1, cottage));
     try std.testing.expect(g.build(0, s.Cell{ .x = 39, .y = 39 }, .cottage) == null);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(s.crossing_seconds);
     g.people = 8;
-    g.stores[0] = s.bridge_cost;
-    g.stores[1] = .{};
+    g.store(0).* = s.bridge_cost;
+    g.store(1).* = .{};
     try std.testing.expect(g.buildBridge(0) != null);
-    g.stores[0].grain = s.ferryRations(0, 1, 4);
+    g.store(0).grain = s.ferryRations(0, 1, 4);
     try std.testing.expect(g.ferrySettlers(1, 4) == null);
     try std.testing.expectEqualStrings("Bring at least one settler to this island before building.", g.build(1, cottage, .cottage).?);
     g.advanceShip(s.crossing_seconds);
     try std.testing.expect(g.buildBridge(0) != null);
-    try std.testing.expectEqualDeep(s.bridge_cost, g.stores[0]);
-    g.stores[1] = s.bridge_cost;
+    try std.testing.expectEqualDeep(s.bridge_cost, g.store(0).*);
+    g.store(1).* = s.bridge_cost;
     try std.testing.expect(g.buildBridge(0) == null);
-    try std.testing.expect(g.stores[0].empty() and g.stores[1].empty());
+    try std.testing.expect(g.store(0).empty() and g.store(1).empty());
     g = decode(&encode(g)).?;
     try std.testing.expect(g.bridges[0]);
     try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(0, 0).?);
@@ -498,10 +511,20 @@ test "cargo resumes at sea and local stock pays for the bridge on both shores" {
     try std.testing.expectEqual(@as(usize, 1), g.walkers.count);
     _ = g.advanceWalkers(s.crossings[0].walkSeconds() / 2);
     try std.testing.expectEqual(@as(u16, 5), g.residents(0));
-    g.stores[1].timber = 3;
-    try std.testing.expect(g.sendCargo(0, 1, .{ .timber = 2 }) == null);
-    try std.testing.expectEqual(@as(u16, 2), g.stores[0].timber);
-    try std.testing.expectEqual(@as(u16, 1), g.stores[1].timber);
+    // The roads joined the islands: one stockpile serves both, across reloads.
+    try std.testing.expect(g.linked(0, 1));
+    g.store(1).timber = 3;
+    g = decode(&encode(g)).?;
+    try std.testing.expectEqual(@as(u16, 3), g.stockOf(0).timber);
+    try std.testing.expect(g.stockpiles[1].empty());
+    // A save that claims a join the roads don't support is rejected.
+    var forged = s.Game.init();
+    forged.joined[0] = true;
+    try std.testing.expect(decode(&encode(forged)) == null);
+    // So is one that keeps goods outside the shared stockpile.
+    var split = g;
+    split.stockpiles[1].timber = 1;
+    try std.testing.expect(decode(&encode(split)) == null);
 }
 
 test "charter credits a provisioned ferry landing at the camp" {
@@ -510,22 +533,22 @@ test "charter credits a provisioned ferry landing at the camp" {
     try surveyFerryAndReturn(&g);
     try std.testing.expect(!g.charter.ferried_to_bali);
     try std.testing.expect(g.sailFerry(0) != null);
-    try std.testing.expect(g.sendCargo(0, 0, .{ .timber = 1 }) == null);
+    try std.testing.expect(g.sendFerry(1, 0, .{ .timber = 1 }) == null);
     g.advanceShip(s.crossing_seconds);
     try std.testing.expect(!g.charter.ferried_to_bali);
     try std.testing.expect(g.sailFerry(0) == null);
     g.advanceShip(s.crossing_seconds);
 
-    g.stores[0].grain = 0;
-    g.stores[0].venison = 1;
+    g.store(0).grain = 0;
+    g.store(0).venison = 1;
     try std.testing.expect(g.ferrySettlers(1, 2) != null);
-    try std.testing.expectEqual(@as(u16, 1), g.stores[0].venison);
+    try std.testing.expectEqual(@as(u16, 1), g.store(0).venison);
     try std.testing.expectEqual(@as(?usize, 0), g.mooredChart());
 
-    g.stores[0].grain = 4;
+    g.store(0).grain = 4;
     try std.testing.expect(g.ferrySettlers(1, 2) == null);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].venison);
-    try std.testing.expectEqual(@as(u16, 0), g.stores[0].grain);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).venison);
+    try std.testing.expectEqual(@as(u16, 0), g.store(0).grain);
     try std.testing.expectEqual(@as(u16, 3), g.ferry.cargo.grain);
     try std.testing.expectEqual(@as(u16, 3), g.ferry.cargo.water);
     try std.testing.expectEqual(@as(u16, 0), g.housing(1));
@@ -534,7 +557,7 @@ test "charter credits a provisioned ferry landing at the camp" {
     g.advanceShip(s.crossing_seconds);
     try std.testing.expect(g.charter.ferried_to_bali);
     try std.testing.expectEqual(@as(u16, 2), g.residents(1));
-    try std.testing.expectEqual(@as(u16, 3), g.stores[1].water);
+    try std.testing.expectEqual(@as(u16, 3), g.store(1).water);
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
 
     _ = g.tick();
@@ -544,7 +567,7 @@ test "charter credits a provisioned ferry landing at the camp" {
 
 test "diet counters and fruit survive saves" {
     var g = s.Game.init();
-    g.stores[0].fruit = 0;
+    g.store(0).fruit = 0;
     g.diets[0].missed_grain = true;
     _ = g.tick();
     try std.testing.expectEqual(@as(u8, 1), g.diets[0].days_without_fruit);
@@ -566,7 +589,7 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
     g.charter.housed_eight = true;
-    g.stores[0] = .{ .timber = 100, .stone = 20, .grain = 60, .venison = 60, .fruit = 60, .water = 0 };
+    g.store(0).* = .{ .timber = 100, .stone = 20, .grain = 60, .venison = 60, .fruit = 60, .water = 0 };
 
     const before_exploration = encode(g);
     g = decode(&before_exploration).?;
@@ -574,14 +597,14 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
     try std.testing.expect(g.buildShip(0, .barque) != null);
     const brig = s.shipCost(.brig);
     try std.testing.expect(g.buildShip(0, .brig) == null);
-    try std.testing.expectEqual(@as(u16, 100) - brig.timber, g.stores[0].timber);
+    try std.testing.expectEqual(@as(u16, 100) - brig.timber, g.store(0).timber);
     try std.testing.expectEqual(@as(u16, 130) - brig.coins, g.coins);
     try std.testing.expect(g.launchExpedition(0, 1, 0, .{}) != null);
     try std.testing.expect(g.launchExpedition(0, 0, 0, .{}) != null);
-    g.stores[0].water = 60;
+    g.store(0).water = 60;
     try std.testing.expect(g.launchExpedition(0, 0, 0, .{}) == null);
     const outward = s.ocean.routes[0];
-    try std.testing.expectEqual(@as(u16, 60) - s.expeditionRations(outward), g.stores[0].fruit);
+    try std.testing.expectEqual(@as(u16, 60) - s.expeditionRations(outward), g.store(0).fruit);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(0, 3));
     g = decode(&encode(g)).?;
     try std.testing.expectEqual(@as(f32, 3), g.fleet.vessels[0].elapsed);
@@ -593,14 +616,14 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
     try std.testing.expectEqual(@as(f32, 1), g.fleet.vessels[0].progress());
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
 
-    const stores_at_departure = g.stores;
+    const stores_at_departure = g.stockpiles;
     try std.testing.expect(g.returnExpedition(0) == null);
     try std.testing.expect(g.returnExpedition(0) != null);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(0, outward.leg_seconds / 2));
     g = decode(&encode(g)).?;
     try std.testing.expectEqual(@as(f32, 0.5), g.fleet.vessels[0].progress());
     try std.testing.expectEqual(s.Game.ExpeditionEvent.returned, g.advanceExpedition(0, outward.leg_seconds / 2));
-    try std.testing.expectEqualDeep(stores_at_departure, g.stores);
+    try std.testing.expectEqualDeep(stores_at_departure, g.stockpiles);
     try std.testing.expect(g.buildShip(0, .barque) != null);
     try std.testing.expect(g.sendFerry(1, 0, .{ .timber = 1 }) == null);
     g.advanceShip(s.crossing_seconds);
@@ -621,7 +644,7 @@ test "a survey ship lands settlers and supplies on the island it charts" {
     try surveyFerryAndReturn(&g);
     g.charter = .{ .ferried_to_bali = true, .won = true, .housed_eight = true };
     g.bridges[0] = true;
-    g.stores[0] = .{ .timber = 100, .stone = 60, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(0).* = .{ .timber = 100, .stone = 60, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     try std.testing.expect(g.buildShip(0, .brig) == null);
     const route = s.ocean.routes[0];
     const limit = g.surveySettlerLimit(0, 0);
@@ -638,7 +661,7 @@ test "a survey ship lands settlers and supplies on the island it charts" {
     try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, route.leg_seconds));
     try std.testing.expect(g.fleet.charted[0]);
     try std.testing.expectEqual(limit, g.residents(route.chart));
-    try std.testing.expectEqualDeep(camp, g.stores[route.chart]);
+    try std.testing.expectEqualDeep(camp, g.store(route.chart).*);
     try std.testing.expect(!g.fleet.vessels[0].carryingLoad() and !g.fleet.vessels[0].surveying);
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
 }
@@ -666,7 +689,7 @@ test "Lombok keeps settlers and cargo after a saved passage" {
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
     g.charter.housed_eight = true;
-    g.stores[0] = .{ .timber = 100, .stone = 60, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(0).* = .{ .timber = 100, .stone = 60, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     try std.testing.expect(g.buildShip(0, .brig) == null);
     try std.testing.expect(g.sendExpedition(0, 0, 1, .{}) != null);
     try std.testing.expect(g.launchExpedition(0, 0, 0, .{}) == null);
@@ -678,12 +701,12 @@ test "Lombok keeps settlers and cargo after a saved passage" {
     try std.testing.expectEqual(@as(u16, 1), g.countOn(2, .port));
 
     const stock = s.Stores{ .timber = 19, .stone = 4, .grain = 6, .venison = 6, .fruit = 6, .water = 6 };
-    const water = g.stores[0].water;
+    const water = g.store(0).water;
     const rations = g.oceanRations(0, 0, 1).water;
     try std.testing.expectEqual(@as(u16, 0), g.housing(2));
     try std.testing.expect(g.sendExpedition(0, 0, 5, stock) != null);
     try std.testing.expect(g.sendExpedition(0, 0, 1, stock) == null);
-    try std.testing.expectEqual(water - rations - stock.water, g.stores[0].water);
+    try std.testing.expectEqual(water - rations - stock.water, g.store(0).water);
     try std.testing.expectEqual(@as(u16, 3), g.residents(0));
     try std.testing.expectEqual(@as(u16, 0), g.residents(2));
     _ = g.advanceExpedition(0, 5);
@@ -693,13 +716,13 @@ test "Lombok keeps settlers and cargo after a saved passage" {
 
     try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(0, route.leg_seconds - 5));
     try std.testing.expectEqual(@as(u16, 1), g.residents(2));
-    try std.testing.expectEqualDeep(stock, g.stores[2]);
+    try std.testing.expectEqualDeep(stock, g.store(2).*);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(0, 100));
-    try std.testing.expectEqualDeep(stock, g.stores[2]);
+    try std.testing.expectEqualDeep(stock, g.store(2).*);
     try std.testing.expectEqual(@as(?usize, 0), s.ocean.routeTo(g.fleet.vessels[0].chart));
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
     try std.testing.expect(g.build(2, s.Cell{ .x = 26, .y = 30 }, .well) == null);
-    try std.testing.expectEqual(@as(u16, 2), g.stores[2].stone);
+    try std.testing.expectEqual(@as(u16, 2), g.store(2).stone);
     try returnExpeditionToJava(&g);
     try std.testing.expectEqual(@as(u16, 1), g.residents(2));
     try std.testing.expectEqual(@as(u16, 4), g.people);
@@ -719,7 +742,7 @@ test "Borneo and Sumatra can be surveyed, settled, and restored at sea and on sh
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
     g.charter.housed_eight = true;
-    g.stores[0] = .{ .timber = 400, .stone = 100, .grain = 800, .venison = 800, .fruit = 800, .water = 800 };
+    g.store(0).* = .{ .timber = 400, .stone = 100, .grain = 800, .venison = 800, .fruit = 800, .water = 800 };
 
     try std.testing.expect(g.buildShip(0, .brig) == null);
     try std.testing.expect(g.oceanRations(0, sumatra_route, 0).units() > g.fleet.vessels[0].ship.hold());
@@ -739,29 +762,29 @@ test "Borneo and Sumatra can be surveyed, settled, and restored at sea and on sh
     const before_load = encode(g);
     try std.testing.expect(g.sendExpedition(0, borneo_route, 2, .{ .timber = 49 }) != null);
     try std.testing.expectEqual(before_load, encode(g));
-    const reserves = g.stores[0].water;
+    const reserves = g.store(0).water;
     const rations = g.oceanRations(0, borneo_route, 2).water;
     try std.testing.expect(g.sendExpedition(0, borneo_route, 2, camp) == null);
-    try std.testing.expectEqual(reserves - rations - camp.water, g.stores[0].water);
+    try std.testing.expectEqual(reserves - rations - camp.water, g.store(0).water);
     try std.testing.expectEqual(@as(u16, 2), g.reservedBeds(borneo));
     try std.testing.expectEqual(@as(u16, 0), g.reservedBeds(sumatra));
     _ = g.advanceExpedition(0, 2);
     g = decode(&encode(g)).?;
-    const borneo_stores = g.stores[borneo];
+    const borneo_stores = g.store(borneo).*;
     try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(0, borneo_trip.leg_seconds - 2));
     try std.testing.expectEqual(@as(u16, 2), g.residents(borneo));
     try std.testing.expect(g.founded[0]);
     var borneo_after = borneo_stores;
     borneo_after.add(camp);
-    try std.testing.expectEqualDeep(borneo_after, g.stores[borneo]);
+    try std.testing.expectEqualDeep(borneo_after, g.store(borneo).*);
     try std.testing.expect(g.build(borneo, s.Cell{ .x = 140, .y = 172 }, .well) == null);
     try std.testing.expect(g.build(borneo, s.Cell{ .x = 140, .y = 177 }, .lodge) == null);
     try std.testing.expect(g.build(borneo, s.Cell{ .x = 145, .y = 187 }, .road) == null);
     try std.testing.expect(g.production(borneo).fruit > 0);
     g = decode(&encode(g)).?;
-    const settled_borneo = g.stores[borneo];
+    const settled_borneo = g.store(borneo).*;
     try returnExpeditionToJava(&g);
-    try std.testing.expectEqualDeep(settled_borneo, g.stores[borneo]);
+    try std.testing.expectEqualDeep(settled_borneo, g.store(borneo).*);
 
     try std.testing.expect(g.launchExpedition(0, 0, 0, .{}) == null);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, s.ocean.routes[0].leg_seconds));
@@ -776,8 +799,8 @@ test "Borneo and Sumatra can be surveyed, settled, and restored at sea and on sh
     try std.testing.expectEqual(@as(u16, 2), g.reservedBeds(sumatra));
     try std.testing.expectEqual(@as(u16, 0), g.reservedBeds(borneo));
     try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(1, sumatra_trip.leg_seconds));
-    try std.testing.expectEqualDeep(camp, g.stores[sumatra]);
-    try std.testing.expectEqualDeep(settled_borneo, g.stores[borneo]);
+    try std.testing.expectEqualDeep(camp, g.store(sumatra).*);
+    try std.testing.expectEqualDeep(settled_borneo, g.store(borneo).*);
     try std.testing.expect(g.build(sumatra, s.Cell{ .x = 76, .y = 34 }, .well) == null);
     try std.testing.expect(g.build(sumatra, s.Cell{ .x = 72, .y = 39 }, .lodge) == null);
     try std.testing.expect(g.production(sumatra).fruit > 0);
@@ -805,7 +828,7 @@ test "every expedition destination supports a survey and a saved settlement voya
             g.fleet.charted[0] = true;
             g.openPort(2);
         }
-        g.stores[0] = .{ .timber = 100, .stone = 100, .grain = 200, .venison = 200, .fruit = 200, .water = 200 };
+        g.store(0).* = .{ .timber = 100, .stone = 100, .grain = 200, .venison = 200, .fruit = 200, .water = 200 };
         try std.testing.expect(g.launchExpedition(0, index, 0, .{}) == null);
         try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, route.leg_seconds));
         try std.testing.expectEqual(@as(u16, 1), g.countOn(route.chart, .port));
@@ -823,7 +846,7 @@ test "every expedition destination supports a survey and a saved settlement voya
         try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(0, route.leg_seconds - 1));
         try std.testing.expectEqual(@as(u16, 2), g.residents(route.chart));
         if (route.chart >= s.geography.borneo) try std.testing.expect(g.founded[route.chart - s.geography.borneo]);
-        try std.testing.expectEqualDeep(load, g.stores[route.chart]);
+        try std.testing.expectEqualDeep(load, g.store(route.chart).*);
 
         const grid = s.geography.grids[route.chart];
         for (0..grid.area()) |tile| {
@@ -846,7 +869,7 @@ test "every expedition destination supports a survey and a saved settlement voya
         try std.testing.expect(g.sendExpedition(0, index, 0, .{ .timber = 6 }) == null);
         try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(0, route.leg_seconds));
         try std.testing.expectEqual(@as(u16, 2), g.residents(route.chart));
-        try std.testing.expectEqual(@as(u16, 6), g.stores[route.chart].timber);
+        try std.testing.expectEqual(@as(u16, 6), g.store(route.chart).timber);
     }
 }
 
@@ -863,13 +886,13 @@ test "shipyards charge local stores and reserve berths for incoming ships across
     g.ferry.destination = 1;
     g.openPort(1);
     g.coins = 200;
-    g.stores[0] = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
-    g.stores[1] = g.stores[0];
+    g.store(0).* = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(1).* = g.store(0).*;
 
-    const java_stores = g.stores[0];
+    const java_stores = g.store(0).*;
     try std.testing.expect(g.buildShip(1, .brig) == null);
-    try std.testing.expectEqualDeep(java_stores, g.stores[0]);
-    try std.testing.expectEqual(@as(u16, 168), g.stores[1].timber);
+    try std.testing.expectEqualDeep(java_stores, g.store(0).*);
+    try std.testing.expectEqual(@as(u16, 168), g.store(1).timber);
     try std.testing.expectEqual(@as(usize, 2), g.berthsUsed(1));
     const bali_full = encode(g);
     try std.testing.expect(g.buildShip(1, .brig) != null);
@@ -914,12 +937,12 @@ test "concurrent cargo voyages reserve landing space and unload exactly once" {
     g.ferry.destination = 1;
     g.openPort(1);
     g.coins = 100;
-    g.stores[0] = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(0).* = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     try std.testing.expect(g.buildShip(0, .brig) == null);
     try std.testing.expect(g.buildShip(0, .brig) == null);
     g.fleet.charted[0] = true;
     g.openPort(2);
-    g.stores[2].timber = std.math.maxInt(u16) - 10;
+    g.store(2).timber = std.math.maxInt(u16) - 10;
     try std.testing.expect(g.sendExpedition(0, 0, 2, .{ .timber = 6 }) == null);
     try std.testing.expect(g.sendExpedition(1, 0, 3, .{}) != null);
     try std.testing.expect(g.sendExpedition(1, 0, 2, .{ .timber = 5 }) != null);
@@ -932,14 +955,14 @@ test "concurrent cargo voyages reserve landing space and unload exactly once" {
         try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(id, 100));
     }
     try std.testing.expectEqual(@as(u16, 4), g.residents(2));
-    try std.testing.expectEqual(std.math.maxInt(u16), g.stores[2].timber);
+    try std.testing.expectEqual(std.math.maxInt(u16), g.store(2).timber);
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
 }
 
 test "woodlots and hunting lodges resume their recovery after reload" {
     var g = s.Game.init();
     g.people = 1;
-    g.stores[0] = .{ .timber = 100, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    g.store(0).* = .{ .timber = 100, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     const woods = s.Cell{ .x = 30, .y = 30 };
     const herd = s.Cell{ .x = 30, .y = 35 };
     try std.testing.expect(g.build(0, woods, .grove) == null);
@@ -951,10 +974,10 @@ test "woodlots and hunting lodges resume their recovery after reload" {
     for (0..4) |day| {
         try std.testing.expectEqual(@as(u16, 4), g.production(0).timber);
         try std.testing.expectEqual(@as(u16, 3), g.production(0).venison);
-        const before = g.stores[0];
+        const before = g.store(0).*;
         _ = g.tick();
-        try std.testing.expectEqual(before.timber + 4, g.stores[0].timber);
-        try std.testing.expectEqual(before.venison + 2, g.stores[0].venison);
+        try std.testing.expectEqual(before.timber + 4, g.store(0).timber);
+        try std.testing.expectEqual(before.venison + 2, g.store(0).venison);
         try std.testing.expectEqual(@as(u4, @intCast(9 - 3 * day)), g.harvestStatus(0, woods).?.stock);
     }
 
@@ -976,8 +999,8 @@ test "woodlots and hunting lodges resume their recovery after reload" {
     _ = g.tick();
     try std.testing.expectEqual(@as(u16, 4), g.production(0).timber);
 
-    g.stores[0].timber = std.math.maxInt(u16);
-    g.stores[0].venison = std.math.maxInt(u16);
+    g.store(0).timber = std.math.maxInt(u16);
+    g.store(0).venison = std.math.maxInt(u16);
     _ = g.tick();
     try std.testing.expectEqual(s.harvest_capacity, g.harvestStatus(0, woods).?.stock);
     try std.testing.expectEqual(s.harvest_capacity, g.harvestStatus(0, herd).?.stock);

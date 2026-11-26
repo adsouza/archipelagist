@@ -11,10 +11,6 @@ pub const Command = union(enum) {
     build: struct { island: usize, cell: domain.Cell, kind: domain.Kind },
     /// Bridge a crossing in `domain.crossings`.
     build_bridge: usize,
-    /// Start a settler walking over a bridge to one of its islands. They
-    /// arrive after the walk, as `advance` runs it.
-    cross_bridge: struct { crossing: usize, destination: usize },
-    transfer_stores: struct { crossing: usize, source: usize, cargo: domain.Stores },
     /// Send the ferry's crew to chart a harbor in range of its mooring.
     /// Settlers and cargo aboard found a camp there on arrival.
     survey_harbor: struct { destination: usize, manifest: Manifest },
@@ -111,8 +107,6 @@ pub fn apply(game: *domain.Game, command: Command) Outcome {
         else
             "Choose an island on the chart.",
         .build_bridge => |crossing| game.buildBridge(crossing),
-        .cross_bridge => |c| game.crossBridge(c.crossing, c.destination),
-        .transfer_stores => |c| game.sendCargo(c.crossing, c.source, c.cargo),
         .survey_harbor => |c| game.surveyByFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .send_ferry => |c| game.sendFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .sail_ferry => |chart| game.sailFerry(chart),
@@ -202,7 +196,7 @@ test "a bridge crossing lands its settler as an arrival once the walk is done" {
     game.openPort(1);
     game.bridges[0] = true;
     game.paveBridge(0);
-    try std.testing.expect(apply(&game, .{ .cross_bridge = .{ .crossing = 0, .destination = 1 } }) == .applied);
+    try std.testing.expect(game.crossBridge(0, 1) == null);
     const walk = domain.crossings[0].walkSeconds();
     try std.testing.expectEqual(@as(usize, 0), apply(&game, .{ .advance = walk / 3 }).advanced.arrivals.len);
     // The rest of the walk, ending before the day does, so Bali's empty stores go untested.
@@ -221,16 +215,20 @@ test "after the charter ends only the clock may be advanced" {
     try std.testing.expect(apply(&game, .{ .advance = 1 }) == .advanced);
 }
 
-test "overland transfers start only from an island on that bridge" {
+test "the road that reaches a bridge pools both islands' stores" {
     var game = domain.Game.init();
     game.bridges[0] = true;
     game.ferry.surveyed = true;
     game.openPort(1);
-    try std.testing.expectEqualStrings("Choose an island on that bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 2, .cargo = .{ .timber = 1 } } }).problem().?);
-    try std.testing.expectEqualStrings("Choose a bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = domain.crossings.len, .source = 0, .cargo = .{ .timber = 1 } } }).problem().?);
-    game.stores[1].timber = 3;
-    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 1, .cargo = .{ .timber = 1 } } }).problem().?);
-    game.paveBridge(0);
-    try std.testing.expect(apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 1, .cargo = .{ .timber = 1 } } }) == .applied);
-    try std.testing.expectEqual(@as(u16, 2), game.stores[1].timber);
+    game.store(0).stone = 5;
+    game.store(1).timber = 3;
+    var buffer: [domain.geography.max_grid_area]domain.Cell = undefined;
+    for (game.bridgeRoadPath(0, 1, &buffer).?) |cell| game.setTile(1, cell, .road);
+    const java_road = game.bridgeRoadPath(0, 0, &buffer).?;
+    try std.testing.expectEqual(@as(usize, 1), java_road.len);
+    const timber = game.stockOf(0).timber;
+    try std.testing.expect(!game.linked(0, 1));
+    try std.testing.expect(apply(&game, .{ .build = .{ .island = 0, .cell = java_road[0], .kind = .road } }) == .applied);
+    try std.testing.expect(game.linked(0, 1));
+    try std.testing.expectEqual(timber + 3, game.stockOf(1).timber);
 }

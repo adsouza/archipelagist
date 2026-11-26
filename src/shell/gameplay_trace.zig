@@ -72,7 +72,7 @@ test "command diagnostics preserve outcomes and record accepted and denied actio
         const without_trace = dispatch(.{}, &unobserved, command);
         try std.testing.expectEqualDeep(without_trace.problem(), with_trace.problem());
     }
-    try std.testing.expectEqualDeep(unobserved.stores, observed.stores);
+    try std.testing.expectEqualDeep(unobserved.stockpiles, observed.stockpiles);
     try std.testing.expectEqual(unobserved.coins, observed.coins);
     var buffer: [4096]u8 = undefined;
     const data = try temp.dir.readFile(std.testing.io, "trace/trace.jsonl", &buffer);

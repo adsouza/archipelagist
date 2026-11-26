@@ -100,7 +100,7 @@ test "a recorded session replays to the same state with matching checkpoints" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     var game = domain.Game.init();
-    game.stores[0].grain = 40;
+    game.store(0).grain = 40;
     {
         var recorder = try Recorder.open(std.testing.io, temp.dir, "diagnostics");
         defer recorder.deinit();

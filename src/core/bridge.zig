@@ -180,27 +180,6 @@ fn endProblem(crossing: usize, chart: usize) ?[:0]const u8 {
     return null;
 }
 
-pub fn bridgeCargoLimit(g: *const Game, crossing: usize, source: usize) Stores {
-    if (endProblem(crossing, source) != null) return .{};
-    const target = crossings[crossing].across(source);
-    return g.loadingLimits(source, target, .{}, g.incomingCargo(target));
-}
-
-pub fn sendCargo(g: *Game, crossing: usize, source: usize, load: Stores) ?[:0]const u8 {
-    if (endProblem(crossing, source)) |problem| return problem;
-    const target = crossings[crossing].across(source);
-    if (!g.bridges[crossing]) {
-        if (g.mooredChart() != source) return "The ferry must be moored at the loading port.";
-        return g.sendFerry(target, 0, load);
-    }
-    if (g.footpathProblem(crossing)) |problem| return problem;
-    if (load.empty()) return "Choose supplies to send.";
-    if (!g.bridgeCargoLimit(crossing, source).includes(load)) return "There is not enough stock or room for this cargo.";
-    g.stores[source].take(load);
-    g.stores[target].add(load);
-    return null;
-}
-
 pub fn bridgeProblem(g: *const Game, crossing: usize) ?[:0]const u8 {
     if (crossing >= crossings.len) return "Choose a bridge.";
     if (g.bridges[crossing]) return "The bridge is already built.";
@@ -214,7 +193,7 @@ pub fn bridgeProblem(g: *const Game, crossing: usize) ?[:0]const u8 {
         if (g.workforce(chart) == 0) return "Both islands need settlers able to work on the bridge.";
     }
     for (plan.charts) |chart| {
-        const stock = g.stores[chart];
+        const stock = g.stockOf(chart);
         if (stock.timber < plan.cost.timber or stock.stone < plan.cost.stone) return "Both islands must stockpile their share of timber and stone.";
     }
     return null;
@@ -224,16 +203,18 @@ pub fn buildBridge(g: *Game, crossing: usize) ?[:0]const u8 {
     if (g.bridgeProblem(crossing)) |problem| return problem;
     const plan = crossings[crossing];
     for (plan.charts) |chart| {
-        g.stores[chart].timber -= plan.cost.timber;
-        g.stores[chart].stone -= plan.cost.stone;
+        g.store(chart).timber -= plan.cost.timber;
+        g.store(chart).stone -= plan.cost.stone;
     }
     g.bridges[crossing] = true;
+    g.relink();
     // Eight crew have worked both shores by the time the strait is bridged.
     if (crossing == strait) g.charter.housed_eight = true;
     return null;
 }
 
-/// Walk one settler across a bridge to `destination`.
+/// Start one settler walking across a bridge to `destination`. Settlers
+/// choose this themselves each day (`flowSettlers`).
 pub fn crossBridge(g: *Game, crossing: usize, destination: usize) ?[:0]const u8 {
     if (endProblem(crossing, destination)) |problem| return problem;
     if (g.footpathProblem(crossing)) |problem| return problem;
@@ -246,6 +227,35 @@ pub fn crossBridge(g: *Game, crossing: usize, destination: usize) ?[:0]const u8 
     g.walkers.items[g.walkers.count] = .{ .crossing = crossing, .destination = destination };
     g.walkers.count += 1;
     return null;
+}
+
+/// Settlers keep at least this many on an island before they leave it, so
+/// both ends of a bridge can still grow.
+pub const keep_home: u16 = 2;
+
+/// Once a day, settlers walk over each joined bridge to where they are
+/// needed: to an island with fewer than `keep_home` settlers, or away from
+/// an island whose beds are full to one with beds to spare. One settler
+/// sets out per bridge per day, and only from an island that keeps
+/// `keep_home` behind.
+pub fn flowSettlers(g: *Game) void {
+    for (crossings, g.joined, 0..) |crossing, joined, index| {
+        if (!joined) continue;
+        for (crossing.charts, 0..) |from, side| {
+            const to = crossing.charts[1 - side];
+            if (!needsSettler(g, from, to)) continue;
+            if (g.crossBridge(index, to) == null) break;
+        }
+    }
+}
+
+/// A settler on `from` would be more use on `to`.
+pub fn needsSettler(g: *const Game, from: usize, to: usize) bool {
+    if (g.residents(from) <= keep_home or g.freeLandingSpace(to) == 0) return false;
+    if (g.residents(to) +| g.walkingTo(to) < keep_home) return true;
+    // Moving frees a bed for growth at home and leaves one spare over there,
+    // so nobody walks straight back.
+    return g.freeBeds(from) == 0 and g.freeBeds(to) >= 2;
 }
 
 /// Settlers on a bridge heading for `chart`.
@@ -330,43 +340,78 @@ test "Java to Bali fits the bridge limit and every Bali to Lombok crossing excee
     }
 }
 
-test "a Java to Madura bridge carries settlers and stores both ways" {
+test "a Java to Madura bridge pools stores once roads reach both ends" {
     var g = Game.init();
     g.fleet.charted[colony.ocean.routeTo(madura).?] = true;
     g.openPort(madura);
-    // A second cottage leaves Java room for a settler to walk back.
-    g.setTile(0, .{ .x = 39, .y = 39 }, .cottage);
     g.island_people[madura - 1] = 4;
-    g.people = 4 + 3;
+    g.people = 4 + 4;
     const c = crossings[1];
-    g.stores[0] = .{ .timber = 10, .stone = 10, .grain = 10 };
-    g.stores[madura] = c.cost;
-    try std.testing.expectEqualStrings("Both islands need four resident settlers to build the bridge.", g.bridgeProblem(1).?);
-    g.people += 1;
-    try std.testing.expectEqualStrings("Choose an island on that bridge.", g.crossBridge(1, 1).?);
-    try std.testing.expectEqualStrings("Build the bridge first.", g.crossBridge(1, 0).?);
+    g.store(0).* = .{ .timber = 10, .stone = 10, .grain = 10 };
+    g.store(madura).* = c.cost;
+    g.store(madura).grain = 5;
     try std.testing.expect(g.buildBridge(1) == null);
     try std.testing.expect(g.bridges[1] and !g.bridges[strait]);
     try std.testing.expect(g.hasBridge(madura) and g.hasBridge(0) and !g.hasBridge(1));
-    try std.testing.expectEqual(@as(u16, 10) - c.cost.timber, g.stores[0].timber);
-    try std.testing.expect(g.stores[madura].empty());
-    try std.testing.expectEqualStrings("Lay roads from both harbors to the bridge.", g.crossBridge(1, 0).?);
+    // Each shore paid its share, and the stores stay apart until roads join.
+    try std.testing.expectEqual(@as(u16, 10) - c.cost.timber, g.stockOf(0).timber);
+    try std.testing.expectEqual(@as(u16, 5), g.stockOf(madura).grain);
+    try std.testing.expect(!g.linked(0, madura));
     g.paveBridge(1);
-    try std.testing.expect(g.crossBridge(1, 0) == null);
-    _ = g.advanceWalkers(c.walkSeconds());
-    try std.testing.expectEqual(@as(u16, 5), g.residents(0));
-    try std.testing.expectEqual(@as(u16, 3), g.residents(madura));
-    try std.testing.expect(g.crossBridge(1, madura) == null);
-    _ = g.advanceWalkers(c.walkSeconds());
-    try std.testing.expectEqual(@as(u16, 4), g.residents(madura));
-    try std.testing.expect(g.sendCargo(1, 0, .{ .grain = 4 }) == null);
-    try std.testing.expectEqual(@as(u16, 4), g.stores[madura].grain);
-    try std.testing.expect(g.sendCargo(1, madura, .{ .grain = 1 }) == null);
-    try std.testing.expectEqual(@as(u16, 7), g.stores[0].grain);
-    try std.testing.expectEqualStrings("Choose an island on that bridge.", g.sendCargo(1, 1, .{ .grain = 1 }).?);
+    try std.testing.expect(g.linked(0, madura) and !g.linked(0, 1));
+    try std.testing.expectEqual(@as(usize, 0), g.depot(madura));
+    const pooled = g.stockOf(0);
+    try std.testing.expectEqual(@as(u16, 15), pooled.grain);
+    try std.testing.expectEqualDeep(pooled, g.stockOf(madura));
+    try std.testing.expect(g.stockpiles[madura].empty());
+    // Madura spends from the shared store.
+    g.store(madura).grain -= 3;
+    try std.testing.expectEqual(@as(u16, 12), g.stockOf(0).grain);
 }
 
-/// Java and Bali with the strait bridged, roads to both ends, and settlers on both shores.
+test "settlers walk over a joined bridge to where beds are free" {
+    var g = Game.init();
+    g.fleet.charted[colony.ocean.routeTo(madura).?] = true;
+    g.openPort(madura);
+    g.bridges[1] = true;
+    g.paveBridge(1);
+    // Java's cottages are full and Madura has nobody yet.
+    g.people = g.housing(0);
+    try std.testing.expectEqual(@as(u16, 0), g.freeBeds(0));
+    try std.testing.expect(g.needsSettler(0, madura));
+    try std.testing.expect(!g.needsSettler(madura, 0));
+    g.flowSettlers();
+    try std.testing.expectEqual(@as(u16, 1), g.walkingTo(madura));
+    // One a day: the same bridge sends nobody else until the next day.
+    g.flowSettlers();
+    try std.testing.expectEqual(@as(u16, 2), g.walkingTo(madura));
+    _ = g.advanceWalkers(crossings[1].walkSeconds());
+    try std.testing.expectEqual(@as(u16, 2), g.residents(madura));
+    // Madura has two now, and Java has beds to spare: nobody walks.
+    try std.testing.expect(!g.needsSettler(0, madura));
+    try std.testing.expect(!g.needsSettler(madura, 0));
+}
+
+test "settlers never leave an island with too few behind" {
+    var g = Game.init();
+    g.fleet.charted[colony.ocean.routeTo(madura).?] = true;
+    g.openPort(madura);
+    g.bridges[1] = true;
+    g.paveBridge(1);
+    try std.testing.expectEqual(keep_home, g.residents(0));
+    try std.testing.expect(!g.needsSettler(0, madura));
+    g.flowSettlers();
+    try std.testing.expectEqual(@as(usize, 0), g.walkers.count);
+    // An unjoined bridge carries nobody.
+    var unpaved = Game.init();
+    unpaved.ferry.surveyed = true;
+    unpaved.openPort(1);
+    unpaved.bridges[strait] = true;
+    unpaved.people = unpaved.housing(0);
+    unpaved.flowSettlers();
+    try std.testing.expectEqual(@as(usize, 0), unpaved.walkers.count);
+}
+
 fn bridgedStrait() Game {
     var g = Game.init();
     g.ferry.surveyed = true;

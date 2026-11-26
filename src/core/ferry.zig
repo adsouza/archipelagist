@@ -549,7 +549,7 @@ pub fn ferryBoardingLimit(g: *const Game, destination: usize, survey: bool) u16 
 
 pub fn ferryProvisions(g: *const Game, source: usize, destination: usize, settlers: u16) Stores {
     const amount = ferryRations(source, destination, settlers);
-    const meat = @min(g.stores[source].venison, amount);
+    const meat = @min(g.stockOf(source).venison, amount);
     return .{ .grain = amount - meat, .venison = meat };
 }
 
@@ -564,8 +564,8 @@ pub fn ferryCampSupplies(g: *const Game, destination: usize, settlers: u16, surv
     const home_reserve = 3 * dailyUse(g.residents(source) - settlers);
     var load = Stores{};
     inline for (food_fields ++ .{"water"}) |name| {
-        const needed = meals -| @field(g.stores[destination], name);
-        const spare = @field(g.stores[source], name) -| @field(rations, name) -| home_reserve;
+        const needed = meals -| @field(g.stockOf(destination), name);
+        const spare = @field(g.stockOf(source), name) -| @field(rations, name) -| home_reserve;
         @field(load, name) = @min(needed, spare, @field(limits, name));
     }
     return load;
@@ -589,7 +589,7 @@ fn boardingProblem(g: *const Game, destination: usize, settlers: u16, load: Stor
     const source = g.mooredChart().?;
     const rations = g.ferryProvisions(source, destination, settlers);
     if (load.units() + rations.units() > ferry_hold) return "Cargo and provisions exceed the ferry's hold.";
-    if (!g.stores[source].includes(rations)) return "The ferry needs more grain or venison for the journey.";
+    if (!g.stockOf(source).includes(rations)) return "The ferry needs more grain or venison for the journey.";
     if (!g.ferryCargoLimit(destination, settlers).includes(load)) return "There is not enough stock or room for this cargo.";
     return null;
 }
@@ -598,8 +598,8 @@ fn board(g: *Game, destination: usize, settlers: u16, load: Stores) ?[:0]const u
     if (boardingProblem(g, destination, settlers, load)) |problem| return problem;
     const source = g.mooredChart().?;
     const rations = g.ferryProvisions(source, destination, settlers);
-    g.stores[source].take(rations);
-    g.stores[source].take(load);
+    g.store(source).take(rations);
+    g.store(source).take(load);
     if (source != 0) g.island_people[source - 1] -= settlers;
     g.ferry.cargo = load;
     g.ferry.passengers = settlers;
@@ -737,7 +737,7 @@ test "the ferry surveys Lombok from Bali and carries settlers and stores there" 
     g.advanceShip(legSeconds(2, 1));
     g.people = 8;
     g.island_people[0] = 3;
-    g.stores[1] = .{ .grain = 20, .water = 20, .fruit = 20, .venison = 20 };
+    g.store(1).* = .{ .grain = 20, .water = 20, .fruit = 20, .venison = 20 };
     try std.testing.expect(g.ferrySettlers(2, 2) == null);
     try std.testing.expectEqual(@as(u16, 1), g.residents(1));
     try std.testing.expectEqual(@as(u16, 2), g.reservedBeds(2));
@@ -745,7 +745,7 @@ test "the ferry surveys Lombok from Bali and carries settlers and stores there" 
     try std.testing.expect(!cargo.empty());
     g.advanceShip(legSeconds(1, 2));
     try std.testing.expectEqual(@as(u16, 2), g.residents(2));
-    try std.testing.expectEqualDeep(cargo, g.stores[2]);
+    try std.testing.expectEqualDeep(cargo, g.store(2).*);
     try std.testing.expect(g.ferry.cargo.empty() and g.ferry.passengers == 0);
 }
 
@@ -768,7 +768,7 @@ test "a ferry survey lands its settlers and camp supplies when it charts the har
     try std.testing.expect(g.islandOpen(1));
     try std.testing.expect(g.charter.ferried_to_bali);
     try std.testing.expectEqual(@as(u16, 3), g.residents(1));
-    try std.testing.expectEqualDeep(supplies, g.stores[1]);
+    try std.testing.expectEqualDeep(supplies, g.store(1).*);
     try std.testing.expectEqual(@as(?usize, 1), g.mooredChart());
 }
 
