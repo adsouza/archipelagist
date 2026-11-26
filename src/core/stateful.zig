@@ -256,8 +256,9 @@ pub fn check(before: *const domain.Game, after: *const domain.Game, command: Com
             return .init("joined islands keep their goods in one stockpile", "chart {d} holds goods outside depot {d}", .{ chart, after.depot(chart) });
     }
     for (0..domain.settlement_count) |chart| {
-        if (after.berthsUsed(chart) > domain.dock_capacity)
-            return .init("docks never exceed their berths", "chart {d}: {d} berths", .{ chart, after.berthsUsed(chart) });
+        const used = after.berthsUsed(chart);
+        if (used > 1 and used > after.berthCapacity(chart))
+            return .init("docks never exceed their berths", "chart {d}: {d} berths", .{ chart, used });
         if (chart != 0 and after.residents(chart) +| after.reservedBeds(chart) > @max(after.landingCapacity(chart), before.residents(chart) +| before.reservedBeds(chart)))
             return .init("arrivals never exceed landing space", "chart {d}: {d} + {d} booked, room {d}", .{ chart, after.residents(chart), after.reservedBeds(chart), after.landingCapacity(chart) });
     }

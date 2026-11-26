@@ -7,7 +7,7 @@ pub const bridge = @import("bridge.zig");
 pub const charter = @import("charter.zig");
 pub const ocean = @import("expedition.zig");
 pub const geography = @import("geography.zig");
-pub const Kind = enum(u4) { empty, port, cottage, grove, farm, light, road, quarry, lodge, well };
+pub const Kind = enum(u4) { empty, port, cottage, grove, farm, light, road, quarry, lodge, well, apartment, plaza, plaza_paving };
 pub const Tile = packed struct(u8) {
     kind: Kind = .empty,
     harvest_state: u4 = 0,
@@ -15,7 +15,7 @@ pub const Tile = packed struct(u8) {
 pub const settlement_count = geography.settlement_count;
 
 // Types and rules that live in their own modules.
-pub const dock_capacity = fleet.dock_capacity;
+pub const max_dock_capacity = fleet.max_dock_capacity;
 pub const max_expedition_ships = fleet.max_expedition_ships;
 pub const Vessel = fleet.Vessel;
 pub const Fleet = fleet.Fleet;
@@ -41,15 +41,83 @@ pub const Goal = charter.Goal;
 pub const Charter = charter.Charter;
 
 pub const chart_names = geography.names[0..settlement_count];
-pub const names = [_][:0]const u8{ "Meadow", "Harbor house", "Cottage", "Woodlot", "Grain farm", "Lighthouse", "Road", "Quarry", "Hunting lodge", "Well" };
-pub const costs = [_]u16{ 0, 0, 6, 5, 8, 24, 1, 6, 6, 5 };
+pub const names = [_][:0]const u8{ "Meadow", "Harbor house", "Cottage", "Woodlot", "Grain farm", "Lighthouse", "Road", "Quarry", "Hunting lodge", "Well", "Apartments", "Town square", "Town square" };
+pub const costs = [_]u16{ 0, 0, 6, 5, 8, 24, 1, 6, 6, 5, 12, 4, 0 };
 pub const quarry_yield: u16 = 3;
 pub const fruit_yield: u16 = 3;
 pub const weakness_limit: u8 = 6;
 pub const scurvy_days: u8 = 7;
 pub const well_yield: u16 = 4;
 pub const well_stone: u16 = 2;
+pub const lighthouse_range = 4;
 pub const Cell = geography.Cell;
+pub const town_name_limit = 30;
+pub const town_name_bytes = town_name_limit * 4;
+
+pub const TownName = struct {
+    len: u8 = 0,
+    utf8: [town_name_bytes + 1]u8 = @splat(0),
+
+    pub fn isSingleLine(codepoint: u21) bool {
+        return codepoint >= 0x20 and !(codepoint >= 0x7f and codepoint <= 0x9f) and
+            codepoint != 0x2028 and codepoint != 0x2029;
+    }
+
+    pub fn parse(input: []const u8) ?TownName {
+        if (input.len == 0 or input.len > town_name_bytes or std.mem.trim(u8, input, " ").len == 0) return null;
+        const view = std.unicode.Utf8View.init(input) catch return null;
+        var iter = view.iterator();
+        var count: usize = 0;
+        while (iter.nextCodepoint()) |codepoint| {
+            count += 1;
+            if (count > town_name_limit or !isSingleLine(codepoint)) return null;
+        }
+        var name = TownName{ .len = @intCast(input.len) };
+        @memcpy(name.utf8[0..input.len], input);
+        return name;
+    }
+
+    pub fn valid(name: *const TownName) bool {
+        if (name.len > town_name_bytes or !std.mem.allEqual(u8, name.utf8[name.len..], 0)) return false;
+        return name.len == 0 or parse(name.utf8[0..name.len]) != null;
+    }
+
+    pub fn text(name: *const TownName) [:0]const u8 {
+        return name.utf8[0..name.len :0];
+    }
+};
+
+const plaza_offsets = [_]Cell{ .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 0, .y = 1 }, .{ .x = 1, .y = 1 } };
+
+pub fn plazaCells(anchor: Cell) [plaza_offsets.len]Cell {
+    var footprint: [plaza_offsets.len]Cell = undefined;
+    for (&footprint, plaza_offsets) |*cell, offset| {
+        cell.* = .{ .x = anchor.x + offset.x, .y = anchor.y + offset.y };
+    }
+    return footprint;
+}
+
+pub fn isPlaza(kind: Kind) bool {
+    return kind == .plaza or kind == .plaza_paving;
+}
+
+pub fn stoneCost(kind: Kind) u16 {
+    return switch (kind) {
+        .road => costs[@backingInt(Kind.road)],
+        .well => well_stone,
+        .apartment => 8,
+        .plaza => 16,
+        else => 0,
+    };
+}
+
+pub fn beds(kind: Kind) u16 {
+    return switch (kind) {
+        .cottage => 4,
+        .apartment => 12,
+        else => 0,
+    };
+}
 
 pub const harvest_capacity: u4 = 12;
 const harvest_yield: u16 = 3;
@@ -115,6 +183,21 @@ fn terrainSite(code: u8) Site {
 
 pub fn wellSite(p: Cell, chart: usize) bool {
     return depth(p, chart) >= 0.20 and !forest(p, chart) and site(p, chart) == .plain;
+}
+
+/// A coastal land tile within four edge-to-edge steps of this island's quay.
+pub fn lighthouseSite(p: Cell, chart: usize) bool {
+    const grid = geography.grids[chart];
+    if (!grid.contains(p) or depth(p, chart) < 0) return false;
+    const port = grid.quay;
+    const dx = @max(p.x, port.x) - @min(p.x, port.x);
+    const dy = @max(p.y, port.y) - @min(p.y, port.y);
+    if (dx + dy > lighthouse_range) return false;
+    for (roads.directions) |direction| {
+        const next = roads.neighbor(p, direction, grid) orelse continue;
+        if (depth(next, chart) < 0) return true;
+    }
+    return false;
 }
 
 /// The most road tiles a new colony should have to lay to reach a resource
@@ -274,13 +357,20 @@ pub const Game = struct {
     ferry: Ferry = .{},
     fleet: Fleet = .{},
     charter: Charter = .{},
+    town_names: [settlement_count]TownName = @splat(.{}),
 
     // fleet.zig
     pub const vessels = fleet.vessels;
     pub const hasBarque = fleet.hasBarque;
+    pub const berthCapacity = fleet.berthCapacity;
     pub const berthsUsed = fleet.berthsUsed;
+    pub const freeBerths = fleet.freeBerths;
     pub const buildShip = fleet.buildShip;
     pub const oceanRations = fleet.oceanRations;
+    pub const oceanProvisioning = fleet.oceanProvisioning;
+    pub const expeditionPassage = fleet.expeditionPassage;
+    pub const expeditionProblem = fleet.expeditionProblem;
+    pub const returnExpeditionProblem = fleet.returnExpeditionProblem;
     pub const surveyProblem = fleet.surveyProblem;
     pub const launchExpedition = fleet.launchExpedition;
     pub const oceanSettlerLimit = fleet.oceanSettlerLimit;
@@ -295,6 +385,7 @@ pub const Game = struct {
     pub const advanceShip = ferry.advanceShip;
     pub const mooredChart = ferry.mooredChart;
     pub const ferryRouteProblem = ferry.ferryRouteProblem;
+    pub const ferryDestinations = ferry.ferryDestinations;
     pub const ferryLimit = ferry.ferryLimit;
     pub const ferrySurveyLimit = ferry.ferrySurveyLimit;
     pub const ferryBoardingLimit = ferry.ferryBoardingLimit;
@@ -374,8 +465,10 @@ pub const Game = struct {
             const keep = @min(a, b);
             const fold = @max(a, b);
             if (keep == fold) continue;
+            const incoming = g.incomingCargo(keep);
             inline for (store_fields) |name| {
-                @field(g.stockpiles[keep], name) +|= @field(g.stockpiles[fold], name);
+                const room = std.math.maxInt(u16) - @field(incoming, name);
+                @field(g.stockpiles[keep], name) = @min(room, @field(g.stockpiles[keep], name) +| @field(g.stockpiles[fold], name));
             }
             g.stockpiles[fold] = .{};
         }
@@ -411,6 +504,33 @@ pub const Game = struct {
         if (g.tiles[index].kind != kind) g.tiles[index] = .{ .kind = kind };
     }
 
+    /// The upper tile anchors a 2x2 square, extending one tile along each grid axis.
+    pub fn plazaSite(g: *const Game, chart: usize, anchor: Cell) bool {
+        const grid = geography.grids[chart];
+        if (!grid.contains(anchor)) return false;
+        for (plazaCells(anchor)) |cell| {
+            if (!grid.contains(cell) or depth(cell, chart) < 0 or g.tileAt(chart, cell) != .empty or
+                forest(cell, chart) or site(cell, chart) != .plain) return false;
+        }
+        return true;
+    }
+
+    /// Find the single town square containing this tile, including its paving.
+    pub fn plazaAnchor(g: *const Game, chart: usize, cell: Cell) ?Cell {
+        const kind = g.tileAt(chart, cell);
+        if (kind == .plaza) return cell;
+        if (kind != .plaza_paving) return null;
+        var anchor: ?Cell = null;
+        for (plaza_offsets[1..]) |offset| {
+            if (cell.x < offset.x or cell.y < offset.y) continue;
+            const candidate = Cell{ .x = cell.x - offset.x, .y = cell.y - offset.y };
+            if (g.tileAt(chart, candidate) != .plaza) continue;
+            if (anchor != null) return null;
+            anchor = candidate;
+        }
+        return anchor;
+    }
+
     pub fn harvestStatus(g: *const Game, chart: usize, p: Cell) ?HarvestStatus {
         const tile = g.tiles[tileIndex(chart, p)];
         const days = recoveryDays(tile.kind);
@@ -420,6 +540,25 @@ pub const Game = struct {
     fn tileIndex(chart: usize, p: Cell) usize {
         const grid = geography.grids[chart];
         return grid.offset + grid.index(p);
+    }
+
+    pub fn townName(g: *const Game, chart: usize) ?[:0]const u8 {
+        const name = &g.town_names[chart];
+        return if (name.len == 0) null else name.text();
+    }
+
+    pub fn renameTown(g: *Game, chart: usize, name: TownName) ?[:0]const u8 {
+        if (g.countOn(chart, .plaza) == 0) return "Build a town square before naming this town.";
+        if (name.len == 0 or !name.valid()) return "Enter a town name up to 30 characters on one line.";
+        g.town_names[chart] = name;
+        return null;
+    }
+
+    pub fn hasLighthouse(g: *const Game, chart: usize) bool {
+        for (g.tilesOn(chart)) |tile| {
+            if (tile.kind == .light) return true;
+        }
+        return false;
     }
 
     pub fn countOn(g: *const Game, chart: usize, k: Kind) u16 {
@@ -603,9 +742,7 @@ pub const Game = struct {
 
     pub fn housing(g: *const Game, chart: usize) u16 {
         var space: u16 = 0;
-        for (g.tilesOn(chart)) |tile| {
-            if (tile.kind == .cottage) space +|= 4;
-        }
+        for (g.tilesOn(chart)) |tile| space +|= beds(tile.kind);
         return space;
     }
 
@@ -661,10 +798,15 @@ pub const Game = struct {
         return total +| g.walkingTo(chart);
     }
 
+    /// Cargo already on its way to any harbor using this stockpile.
     pub fn incomingCargo(g: *const Game, chart: usize) Stores {
-        var stock = if (g.voyageDestination() == chart) g.ferry.cargo else Stores{};
+        const destination = g.depot(chart);
+        var stock: Stores = .{};
+        if (g.voyageDestination()) |port| {
+            if (g.depot(port) == destination) stock = g.ferry.cargo;
+        }
         for (g.vessels()) |vessel| {
-            if (vessel.phase != .outbound or vessel.chart != chart) continue;
+            if (vessel.phase != .outbound or g.depot(vessel.chart) != destination) continue;
             inline for (store_fields) |name| @field(stock, name) +|= @field(vessel.cargo, name);
         }
         return stock;
@@ -781,32 +923,47 @@ pub const Game = struct {
         if (g.constructionProblem(chart)) |problem| return problem;
         if (!geography.grids[chart].contains(p) or depth(p, chart) < 0) return "Choose a tile on the island.";
         const tile = &g.tiles[tileIndex(chart, p)];
-        if (tile.kind != .empty) return "There is already a building here.";
+        if (k == .apartment) {
+            if (tile.kind != .cottage) return "Choose a cottage to upgrade to apartments.";
+            if (g.countOn(chart, .plaza) == 0) return "Build a town square on this island to unlock apartments.";
+        } else if (k == .plaza) {
+            if (!g.plazaSite(chart, p)) return "Town squares need a clear 2x2 block of land.";
+        } else if (tile.kind != .empty) return "There is already a building here.";
         if (site(p, chart) == .fruit) return "Keep the fruit tree. Connect nearby land features to the harbor to gather fruit.";
-        if (k == .empty or k == .port) return "Choose a building.";
+        if (k == .empty or k == .port or k == .plaza_paving) return "Choose a building.";
         if (k == .grove and !forest(p, chart)) return "Woodlots need a forest tile.";
         if (k == .farm and forest(p, chart)) return "Grain farms need open ground.";
-        if (k == .light and chart != 1) return "Build the lighthouse on Bali.";
-        if (k == .light and (g.coins < 30 or g.people < 8)) return "Requires 30 coins and 8 settlers.";
+        if (k == .light) {
+            if (g.hasLighthouse(chart)) return "This island already has a lighthouse.";
+            if (!lighthouseSite(p, chart)) return std.fmt.comptimePrint(
+                "Choose a coastal tile within {d} tiles of the harbor.",
+                .{lighthouse_range},
+            );
+            if (g.coins < 30 or g.people < 8) return "Requires 30 coins and 8 settlers.";
+        }
         if (k == .quarry and site(p, chart) != .outcrop) return "Choose a rocky outcrop for the quarry.";
         if (k == .lodge and site(p, chart) != .deer) return "Choose a tile where deer graze.";
         if (k == .well and !wellSite(p, chart)) return "Wells need open ground inland.";
-        const cost = costs[@backingInt(k)];
+        const timber = if (k == .road) 0 else costs[@backingInt(k)];
+        const stone = stoneCost(k);
         const local = g.store(chart);
-        if (k == .road) {
-            if (local.stone < cost) return "This island needs more stone for roads.";
-            local.stone -= cost;
-        } else {
-            if (local.timber < cost) return "This island needs more timber.";
-            if (k == .well and local.stone < well_stone) return "A well needs 2 local stone as well as timber.";
-            local.timber -= cost;
-            if (k == .well) local.stone -= well_stone;
-        }
+        if (local.timber < timber) return "This island needs more timber.";
+        if (local.stone < stone) return switch (k) {
+            .road => "This island needs more stone for roads.",
+            .well => "A well needs 2 local stone as well as timber.",
+            else => "This island needs more stone.",
+        };
+        local.timber -= timber;
+        local.stone -= stone;
         tile.* = .{ .kind = k };
-        if (k == .road) g.relink();
+        if (k == .plaza) {
+            const footprint = plazaCells(p);
+            for (footprint[1..]) |cell| g.setTile(chart, cell, .plaza_paving);
+        }
+        if (k == .road or k == .plaza or k == .light) g.relink();
         if (k == .light) {
             g.coins -= 30;
-            g.charter.won = true;
+            if (chart == charter.charter_island) g.charter.won = true;
             g.charter.housed_eight = true;
         }
         return null;
@@ -905,6 +1062,19 @@ pub const Game = struct {
     }
 };
 
+test "a town name holds up to 30 Unicode code points on one line" {
+    var limit: [town_name_bytes]u8 = undefined;
+    for (0..town_name_limit) |i| limit[i * 4 ..][0..4].* = "🌊".*;
+    try std.testing.expectEqualStrings(&limit, TownName.parse(&limit).?.text());
+    try std.testing.expect(TownName.parse(&(limit ++ "a".*)) == null);
+    const too_long: [town_name_limit + 1]u8 = @splat('A');
+    try std.testing.expect(TownName.parse(&too_long) == null);
+    try std.testing.expect(TownName.parse("   ") == null);
+    try std.testing.expect(TownName.parse("First\nSecond") == null);
+    try std.testing.expect(TownName.parse("Port\x00Bay") == null);
+    try std.testing.expect(TownName.parse("\xff") == null);
+}
+
 test "settlement can feed settlers, trade, survey, and commission its lighthouse" {
     var g = Game.init();
     try std.testing.expect(g.build(0, .{ .x = 8, .y = 8 }, .farm) != null);
@@ -943,7 +1113,7 @@ test "settlement can feed settlers, trade, survey, and commission its lighthouse
     for (0..35) |_| _ = g.tick();
     try std.testing.expect(g.sendFerry(1, 1, .{ .timber = costs[@backingInt(Kind.light)] }) == null);
     g.advanceShip(crossing_seconds);
-    if (g.build(1, .{ .x = 24, .y = 24 }, .light)) |problem| {
+    if (g.build(1, .{ .x = 40, .y = 26 }, .light)) |problem| {
         std.debug.print("Population {d}, coins {d}: {s}\n", .{ g.people, g.coins, problem });
         return error.TestUnexpectedResult;
     }
@@ -1226,6 +1396,19 @@ fn freshIsland(chart: usize) Game {
     var g = Game.init();
     if (chart != 0) g.chartHarbor(chart);
     return g;
+}
+
+test "every harbor opens with a coastal lighthouse site within range" {
+    for (geography.grids, 0..) |grid, chart| {
+        const g = freshIsland(chart);
+        for (g.tilesOn(chart), 0..) |tile, i| {
+            const cell = grid.cell(i);
+            if (tile.kind == .empty and lighthouseSite(cell, chart) and site(cell, chart) != .fruit) break;
+        } else {
+            std.debug.print("{s} has no free coastal lighthouse site near its harbor\n", .{chart_names[chart]});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "every island offers enough stone, deer and fruit within a short road of its harbor" {

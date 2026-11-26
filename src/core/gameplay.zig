@@ -26,6 +26,7 @@ pub const Command = union(enum) {
     /// Advance the simulation clock by up to one day of game seconds.
     /// Voyages move first. Crossing the end of a day runs the daily upkeep.
     advance: f32,
+    rename_town: struct { island: usize, name: domain.TownName },
 };
 
 pub const Arrival = union(enum) {
@@ -106,6 +107,10 @@ pub fn apply(game: *domain.Game, command: Command) Outcome {
             game.build(c.island, c.cell, c.kind)
         else
             "Choose an island on the chart.",
+        .rename_town => |c| if (c.island < domain.settlement_count)
+            game.renameTown(c.island, c.name)
+        else
+            "Choose an island on the chart.",
         .build_bridge => |crossing| game.buildBridge(crossing),
         .survey_harbor => |c| game.surveyByFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .send_ferry => |c| game.sendFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
@@ -179,7 +184,7 @@ pub fn advanceVoyages(game: *domain.Game, seconds: f32) Arrivals {
         if (event == .none) continue;
         report.append(.{ .expedition = .{
             .ship = id,
-            .island = if (event == .returned) 0 else vessel.chart,
+            .island = game.fleet.vessels[id].chart,
             .event = event,
             .settlers = vessel.passengers,
             .cargo = vessel.cargo,
@@ -188,6 +193,39 @@ pub fn advanceVoyages(game: *domain.Game, seconds: f32) Arrivals {
     const landed = game.advanceWalkers(seconds);
     for (landed.slice()) |walker| report.append(.{ .walker = .{ .crossing = walker.crossing, .island = walker.destination } });
     return report;
+}
+
+test "a lighthouse needs a coastal tile near its harbor and opens a second berth outside Bali" {
+    var game = domain.Game.init();
+    game.people = 8;
+    game.coins = 60;
+    game.store(0).timber = 48;
+    const light = Command{ .build = .{ .island = 0, .cell = .{ .x = 55, .y = 42 }, .kind = .light } };
+
+    try std.testing.expectEqual(@as(usize, 1), game.berthCapacity(0));
+    try std.testing.expectEqual(@as(usize, 0), game.freeBerths(0));
+    const stock = game.stockOf(0);
+    const inland = Command{ .build = .{ .island = 0, .cell = .{ .x = 52, .y = 43 }, .kind = .light } };
+    const distant_coast = Command{ .build = .{ .island = 0, .cell = .{ .x = 50, .y = 46 }, .kind = .light } };
+    for ([_]Command{ inland, distant_coast }) |command| {
+        try std.testing.expectEqualStrings("Choose a coastal tile within 4 tiles of the harbor.", apply(&game, command).problem().?);
+        try std.testing.expectEqual(domain.Kind.empty, game.tileAt(0, command.build.cell));
+    }
+    try std.testing.expectEqualDeep(stock, game.stockOf(0));
+    try std.testing.expectEqual(@as(u16, 60), game.coins);
+    try std.testing.expect(apply(&game, light) == .applied);
+    try std.testing.expectEqual(@as(usize, 2), game.berthCapacity(0));
+    try std.testing.expectEqual(@as(usize, 1), game.freeBerths(0));
+    try std.testing.expectEqual(@as(usize, 1), game.berthCapacity(1));
+    try std.testing.expectEqual(@as(u16, 24), game.stockOf(0).timber);
+    try std.testing.expectEqual(@as(u16, 30), game.coins);
+    try std.testing.expect(!game.charter.won);
+    try std.testing.expect(!game.charterComplete());
+
+    const second = apply(&game, .{ .build = .{ .island = 0, .cell = .{ .x = 55, .y = 43 }, .kind = .light } });
+    try std.testing.expectEqualStrings("This island already has a lighthouse.", second.problem().?);
+    try std.testing.expectEqual(@as(u16, 24), game.stockOf(0).timber);
+    try std.testing.expectEqual(@as(u16, 30), game.coins);
 }
 
 test "a bridge crossing lands its settler as an arrival once the walk is done" {

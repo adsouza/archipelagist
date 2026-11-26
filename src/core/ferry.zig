@@ -10,7 +10,6 @@ const Game = colony.Game;
 const Stores = colony.Stores;
 const dailyUse = colony.dailyUse;
 const day_seconds = colony.day_seconds;
-const dock_capacity = colony.dock_capacity;
 const food_fields = colony.food_fields;
 const geography = colony.geography;
 const ocean = colony.ocean;
@@ -182,23 +181,27 @@ pub fn laneCourse(from: usize, to: usize, bend: u8, waypoints: []const Point, pr
 /// A course through waypoints, the stops joined by straight runs and the
 /// boat moving at an even pace along them.
 pub fn detourCourse(start: Point, waypoints: []const Point, end: Point, progress: f32) Point {
-    var stops: [max_waypoints + 2]Point = undefined;
-    stops[0] = start;
-    @memcpy(stops[1..][0..waypoints.len], waypoints);
-    stops[waypoints.len + 1] = end;
-    const route = stops[0 .. waypoints.len + 2];
     var total: f32 = 0;
-    for (route[1..], route[0 .. route.len - 1]) |b, a| total += distance(a, b);
-    var left = std.math.clamp(progress, 0, 1) * total;
-    for (route[1..], route[0 .. route.len - 1]) |b, a| {
-        const run = distance(a, b);
-        if (left <= run and run > 0) {
-            const t = left / run;
-            return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t };
-        }
-        left -= run;
+    var previous = start;
+    for (waypoints) |stop| {
+        total += distance(previous, stop);
+        previous = stop;
     }
-    return end;
+    total += distance(previous, end);
+    var left = std.math.clamp(progress, 0, 1) * total;
+    previous = start;
+    for (waypoints) |stop| {
+        const run = distance(previous, stop);
+        if (left <= run and run > 0) return interpolate(previous, stop, left / run);
+        left -= run;
+        previous = stop;
+    }
+    const last = distance(previous, end);
+    return if (last > 0) interpolate(previous, end, @min(1, left / last)) else end;
+}
+
+fn interpolate(a: Point, b: Point, t: f32) Point {
+    return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t };
 }
 
 fn distance(a: Point, b: Point) f32 {
@@ -393,7 +396,7 @@ fn planDetour(from: usize, to: usize) ?Plan {
     return plan;
 }
 
-fn segmentClear(a: Point, b: Point, from: usize, to: usize) bool {
+pub fn segmentClear(a: Point, b: Point, from: usize, to: usize) bool {
     const samples: usize = @max(2, @as(usize, @intFromFloat(4 * distance(a, b))));
     for (0..samples + 1) |step| {
         const t = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(samples));
@@ -525,8 +528,22 @@ pub fn ferryRouteProblem(g: *const Game, destination: usize) ?[:0]const u8 {
     if (destination >= settlement_count or destination == source) return "Choose another harbor.";
     if (!withinRange(source, destination)) return "That harbor is beyond the ferry's range.";
     if (!g.islandOpen(destination)) return "Survey this island before sending the ferry.";
-    if (g.berthsUsed(destination) >= dock_capacity) return "The destination dock has no free berth.";
+    if (g.freeBerths(destination) == 0) return "The destination dock has no free berth.";
     return null;
+}
+
+/// Harbors the ferry can sail to or survey now, nearest first.
+pub fn ferryDestinations(g: *const Game) Neighbors {
+    var available = Neighbors{};
+    const source = g.mooredChart() orelse return available;
+    const nearby = neighbors(source);
+    for (nearby.slice()) |target| {
+        const problem = if (g.islandOpen(target)) g.ferryRouteProblem(target) else g.ferrySurveyProblem(target);
+        if (problem != null) continue;
+        available.items[available.len] = target;
+        available.len += 1;
+    }
+    return available;
 }
 
 pub fn ferryLimit(g: *const Game, destination: usize) u16 {
@@ -633,7 +650,7 @@ pub fn ferrySurveyProblem(g: *const Game, target: usize) ?[:0]const u8 {
         if (vessel.phase == .outbound and vessel.chart == target) return "A ship is already surveying this island.";
     }
     if (g.coins < survey_cost) return "The survey crew needs 20 coins.";
-    if (g.berthsUsed(target) >= dock_capacity) return "The destination dock has no free berth.";
+    if (g.freeBerths(target) == 0) return "The destination dock has no free berth.";
     return null;
 }
 
@@ -770,6 +787,32 @@ test "a ferry survey lands its settlers and camp supplies when it charts the har
     try std.testing.expectEqual(@as(u16, 3), g.residents(1));
     try std.testing.expectEqualDeep(supplies, g.store(1).*);
     try std.testing.expectEqual(@as(?usize, 1), g.mooredChart());
+}
+
+test "the ferry lists only departures it can sail or survey now" {
+    var g = Game.init();
+    g.coins = survey_cost;
+    try std.testing.expectEqualSlices(usize, &.{1}, g.ferryDestinations().slice());
+    g.chartHarbor(1);
+    g.ferry.origin = 1;
+    g.ferry.destination = 1;
+    try std.testing.expectEqualSlices(usize, &.{0}, g.ferryDestinations().slice());
+
+    g.bridges[0] = true;
+    g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    g.fleet.count = 1;
+    g.fleet.vessels[0] = .{ .ship = .brig, .chart = 0 };
+    g.coins = survey_cost - 1;
+    try std.testing.expectEqual(@as(usize, 0), g.ferryDestinations().len);
+    g.coins = survey_cost;
+    const available = g.ferryDestinations();
+    try std.testing.expect(std.mem.indexOfScalar(usize, available.slice(), 2) != null);
+    try std.testing.expect(std.mem.indexOfScalar(usize, available.slice(), 0) == null);
+    g.chartHarbor(2);
+    g.coins = 0;
+    try std.testing.expectEqualSlices(usize, &.{2}, g.ferryDestinations().slice());
+    try std.testing.expect(g.sailFerry(2) == null);
+    try std.testing.expectEqual(@as(usize, 0), g.ferryDestinations().len);
 }
 
 test "the ferry cannot sail out of range or to an unsurveyed harbor" {

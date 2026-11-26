@@ -8,11 +8,13 @@
     html, body { margin: 0; height: 100%; background: #1f4a4c; color: #f3ead8; font: 15px system-ui, sans-serif; }
     body { display: flex; align-items: center; justify-content: center; }
     canvas { display: block; max-width: 100vw; max-height: 100vh; outline: none; }
+    #town-name { position: fixed; box-sizing: border-box; background: #fff7e1; color: #233f40; border: 1px solid #526960; }
     #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
   </style>
 </head>
 <body>
   <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <input id="town-name" type="text" aria-label="Town name" dir="auto" autocomplete="off" hidden>
   <div id="status">Loading Archipelagist…</div>
   <script>
     // The game saves under /persist. Mount it on IndexedDB and load what is
@@ -33,6 +35,77 @@
       }],
       onRuntimeInitialized: () => { document.getElementById("status")?.remove(); },
     };
+    // A native text field gives the canvas dialog browser paste and IME support.
+    const townNameInput = Module.townNameInput = document.getElementById("town-name");
+    let townNameField = null;
+    let townNameAction = 0;
+
+    function positionTownName() {
+      if (!townNameField) return;
+      const canvas = Module.canvas;
+      const rect = canvas.getBoundingClientRect();
+      const scale = Math.min(canvas.width / 1200, canvas.height / 760);
+      const cssX = rect.width / canvas.width;
+      const cssY = rect.height / canvas.height;
+      const { x, y, width, height } = townNameField;
+      Object.assign(townNameInput.style, {
+        left: (rect.left + ((canvas.width - 1200 * scale) / 2 + x * scale) * cssX) + "px",
+        top: (rect.top + ((canvas.height - 760 * scale) / 2 + y * scale) * cssY) + "px",
+        width: (width * scale * cssX) + "px",
+        height: (height * scale * cssY) + "px",
+        paddingInline: (11 * scale * cssX) + "px",
+        fontSize: (24 * scale * cssY) + "px",
+      });
+    }
+
+    Module.openTownName = (value, limit, x, y, width, height) => {
+      townNameField = { limit, x, y, width, height };
+      townNameAction = 0;
+      townNameInput.value = value;
+      townNameInput.hidden = false;
+      positionTownName();
+      townNameInput.focus();
+      townNameInput.select();
+    };
+    Module.takeTownNameAction = () => {
+      const action = townNameAction;
+      townNameAction = 0;
+      return action;
+    };
+    Module.closeTownName = () => {
+      townNameField = null;
+      townNameInput.hidden = true;
+      Module.canvas.focus();
+    };
+    new ResizeObserver(positionTownName).observe(Module.canvas);
+    window.addEventListener("resize", positionTownName);
+
+    function limitTownName(event) {
+      if (!townNameField || event.isComposing) return;
+      const value = townNameInput.value;
+      const limited = Array.from(value).filter(character => {
+        const point = character.codePointAt(0);
+        return point >= 32 && (point < 127 || point > 159) && point !== 0x2028 && point !== 0x2029;
+      }).slice(0, townNameField.limit).join("");
+      if (limited !== value) {
+        const caret = Math.min(townNameInput.selectionStart, limited.length);
+        townNameInput.value = limited;
+        townNameInput.setSelectionRange(caret, caret);
+      }
+    }
+    townNameInput.addEventListener("input", limitTownName);
+    townNameInput.addEventListener("compositionend", limitTownName);
+    for (const type of ["keydown", "keyup", "keypress"]) {
+      window.addEventListener(type, event => {
+        if (event.target !== townNameInput) return;
+        event.stopImmediatePropagation();
+        if (type !== "keydown" || event.isComposing) return;
+        if (event.key === "Enter" || event.key === "Escape") {
+          event.preventDefault();
+          townNameAction = event.key === "Enter" ? 1 : 2;
+        }
+      }, true);
+    }
     window.addEventListener("error", (event) => Module.setStatus("Archipelagist stopped: " + event.message));
   </script>
   {{{ SCRIPT }}}

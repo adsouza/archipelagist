@@ -32,16 +32,43 @@ pub const Hit = struct { chart: usize, cell: s.Cell };
 pub const View = struct {
     center: a.V = a.v(680, 350),
     zoom: f32 = fit_zoom,
+    angle: a.Orientation = .north,
     drag_start: ?a.V = null,
     start_center: a.V = undefined,
     dragged: bool = false,
 
+    fn worldOffset(self: View, delta: a.V) a.V {
+        return self.angle.inverse().apply(a.v(delta.x / self.zoom, delta.y / self.zoom));
+    }
+
     pub fn world(self: View, p: a.V) a.V {
-        return a.v(self.center.x + (p.x - middle.x) / self.zoom, self.center.y + (p.y - middle.y) / self.zoom);
+        const offset = self.worldOffset(a.v(p.x - middle.x, p.y - middle.y));
+        return a.v(self.center.x + offset.x, self.center.y + offset.y);
     }
 
     pub fn project(self: View, p: a.V) a.V {
-        return a.v(middle.x + (p.x - self.center.x) * self.zoom, middle.y + (p.y - self.center.y) * self.zoom);
+        const offset = self.angle.apply(a.v(p.x - self.center.x, p.y - self.center.y));
+        return a.v(middle.x + offset.x * self.zoom, middle.y + offset.y * self.zoom);
+    }
+
+    fn worldBounds(self: View) struct { min: a.V, max: a.V } {
+        // A quarter turn keeps opposite viewport corners opposite on the chart.
+        const first = self.world(a.v(0, 84));
+        const last = self.world(a.v(895, 576));
+        return .{ .min = a.v(@min(first.x, last.x), @min(first.y, last.y)), .max = a.v(@max(first.x, last.x), @max(first.y, last.y)) };
+    }
+
+    pub fn rotate(self: *View, clockwise: bool) void {
+        self.angle = @fromBackingInt(@backingInt(self.angle) +% @as(u2, if (clockwise) 1 else 3));
+        self.drag_start = null;
+    }
+
+    /// The visible top tile of the square can be a different corner after a turn.
+    pub fn plazaAnchor(self: View, top: s.Cell) ?s.Cell {
+        const x: usize = @intFromBool(self.angle == .south or self.angle == .west);
+        const y: usize = @intFromBool(self.angle == .east or self.angle == .south);
+        if (top.x < x or top.y < y) return null;
+        return .{ .x = top.x - x, .y = top.y - y };
     }
 
     pub fn pick(self: View, p: a.V, g: *const s.Game) ?Hit {
@@ -65,6 +92,12 @@ pub const View = struct {
         return land orelse water;
     }
 
+    pub fn placementHit(self: View, picked: ?Hit, tool: s.Kind) ?Hit {
+        var hit = picked orelse return null;
+        if (tool == .plaza) hit.cell = self.plazaAnchor(hit.cell) orelse return null;
+        return hit;
+    }
+
     pub fn input(self: *View, mouse: a.V, inside: bool, dt: f32) bool {
         var click = false;
         if (inside) {
@@ -86,21 +119,25 @@ pub const View = struct {
             const dx = mouse.x - start.x;
             const dy = mouse.y - start.y;
             self.dragged = self.dragged or dx * dx + dy * dy > 16;
-            if (self.dragged) self.center = a.v(self.start_center.x - dx / self.zoom, self.start_center.y - dy / self.zoom);
+            if (self.dragged) {
+                const delta = self.worldOffset(a.v(dx, dy));
+                self.center = a.v(self.start_center.x - delta.x, self.start_center.y - delta.y);
+            }
             if (!r.isMouseButtonDown(.left)) {
                 click = inside and !self.dragged and r.isMouseButtonReleased(.left);
                 self.drag_start = null;
             }
         }
-        const step = 410 * dt / self.zoom;
-        if (r.isKeyDown(.left)) self.center.x -= step;
-        if (r.isKeyDown(.right)) self.center.x += step;
-        if (r.isKeyDown(.up)) self.center.y -= step;
-        if (r.isKeyDown(.down)) self.center.y += step;
-        const half_w = middle.x / self.zoom;
-        const half_h = 246 / self.zoom;
-        self.center.x = std.math.clamp(self.center.x, a.sea_left + half_w, a.sea_left + a.sea_width - half_w);
-        self.center.y = std.math.clamp(self.center.y, a.sea_top + half_h, a.sea_top + a.sea_height - half_h);
+        const east: f32 = if (r.isKeyDown(.right)) 410 * dt else 0;
+        const west: f32 = if (r.isKeyDown(.left)) 410 * dt else 0;
+        const south: f32 = if (r.isKeyDown(.down)) 410 * dt else 0;
+        const north: f32 = if (r.isKeyDown(.up)) 410 * dt else 0;
+        const pan = self.worldOffset(a.v(east - west, south - north));
+        const extents = self.worldOffset(a.v(middle.x, 246));
+        const half_w = @min(@abs(extents.x), a.sea_width / 2);
+        const half_h = @min(@abs(extents.y), a.sea_height / 2);
+        self.center.x = std.math.clamp(self.center.x + pan.x, a.sea_left + half_w, a.sea_left + a.sea_width - half_w);
+        self.center.y = std.math.clamp(self.center.y + pan.y, a.sea_top + half_h, a.sea_top + a.sea_height - half_h);
         if (r.isKeyPressed(.home)) self.* = .{};
         return click;
     }
@@ -120,44 +157,77 @@ pub const View = struct {
         };
     }
 
-    pub fn showIsland(self: *View, chart: usize) void {
-        const inland = a.artWorldPoint(chart, a.v(450, 325));
-        self.* = .{ .center = r.math.vector2Lerp(portPosition(chart), inland, 0.55), .zoom = 3.4 };
+    pub fn showPassage(self: *View, vessel: s.Vessel) void {
+        const origin_chart = vessel.origin;
+        const chart = vessel.chart;
+        if (origin_chart == 0 or chart == 0) {
+            if (s.ocean.routeTo(@max(origin_chart, chart))) |route| return self.showExpedition(route);
+            self.* = .{};
+            return;
+        }
+        const course = s.ocean.directCourse(origin_chart, chart) orelse return self.showRegion();
+        const depart = s.ferry.berth(origin_chart);
+        const arrive = s.ferry.berth(chart);
+        var low = a.v(@min(depart[0], arrive[0]), @min(depart[1], arrive[1]));
+        var high = a.v(@max(depart[0], arrive[0]), @max(depart[1], arrive[1]));
+        for (course.waypoints) |point| {
+            low = a.v(@min(low.x, point[0]), @min(low.y, point[1]));
+            high = a.v(@max(high.x, point[0]), @max(high.y, point[1]));
+        }
+        self.* = .{
+            .center = a.v((low.x + high.x) / 2, (low.y + high.y) / 2),
+            .zoom = @min(1.2, 895 / (high.x - low.x + 240), 492 / (high.y - low.y + 240)),
+        };
     }
 
-    pub fn draw(self: View, g: *const s.Game, hover: ?Hit, time: f32, tool: s.Kind, preview_bridge: bool) void {
+    pub fn showIsland(self: *View, chart: usize) void {
+        const inland = a.artWorldPoint(chart, a.v(450, 325));
+        self.* = .{ .center = r.math.vector2Lerp(portPosition(chart), inland, 0.55), .zoom = 3.4, .angle = self.angle };
+    }
+
+    pub fn draw(self: View, g: *const s.Game, picked: ?Hit, time: f32, tool: s.Kind, preview_bridge: bool) void {
+        const hover = self.placementHit(picked, tool);
+        const hovered_tile = if (picked) |hit| self.angle.apply(a.worldPoint(hit.chart, a.tile(hit.cell))) else null;
         r.gl.rlPushMatrix();
         defer r.gl.rlPopMatrix();
         r.gl.rlTranslatef(middle.x, middle.y, 0);
         r.gl.rlScalef(self.zoom, self.zoom, 1);
-        r.gl.rlTranslatef(-self.center.x, -self.center.y, 0);
-        const upper_left = self.world(a.v(0, 84));
-        const lower_right = self.world(a.v(895, 576));
-        a.sea(time, upper_left, lower_right);
-        a.regionalLand(upper_left, lower_right);
-        if (preview_bridge and !g.bridges[s.strait]) a.drawBridge(s.strait, false);
+        const center = self.angle.apply(self.center);
+        r.gl.rlTranslatef(-center.x, -center.y, 0);
+        const bounds = self.worldBounds();
+        a.sea(time, bounds.min, bounds.max, self.angle);
+        a.regionalLand(bounds.min, bounds.max, self.angle);
+        if (preview_bridge and !g.bridges[s.strait]) _ = a.drawBridge(s.strait, false, self.angle, null);
         const show_settlements = self.zoom >= settlement_detail_zoom;
         for (0..s.settlement_count) |chart| {
             if (!show_settlements) break;
             if (chart >= 2 and !g.islandOpen(chart)) continue;
-            const area = a.visibleTiles(chart, a.localPoint(chart, upper_left), a.localPoint(chart, lower_right)) orelse continue;
+            const area = a.visibleTiles(chart, a.localPoint(chart, bounds.min), a.localPoint(chart, bounds.max)) orelse continue;
             r.gl.rlPushMatrix();
-            const o = a.origin(chart);
+            const o = self.angle.apply(a.origin(chart));
             r.gl.rlTranslatef(o.x, o.y, 0);
             const scale = s.geography.tile_scale;
             r.gl.rlScalef(scale, scale, 1);
             const h = if (hover) |hit| if (hit.chart == chart) hit.cell else null else null;
-            a.island(g, chart, area, h, time, if (g.constructionProblem(chart) == null) tool else .empty, self.zoom >= 1.15);
+            a.island(g, chart, area, h, time, if (g.constructionProblem(chart) == null) tool else .empty, self.zoom >= 1.15, self.angle);
             r.gl.rlPopMatrix();
         }
+        var bridge_opacity: [s.crossings.len]u8 = @splat(255);
         for (g.bridges, 0..) |built, crossing| {
             if (!built) continue;
-            a.drawBridge(crossing, true);
-            a.bridgeTraffic(g, crossing, time);
+            bridge_opacity[crossing] = a.drawBridge(crossing, true, self.angle, hovered_tile);
+            a.bridgeTraffic(g, crossing, time, self.angle, bridge_opacity[crossing]);
         }
-        a.bridgeWalkers(g, time);
-        a.ship(g, time);
-        for (g.vessels(), 0..) |_, id| a.explorationShip(g, id, time);
+        a.bridgeWalkers(g, time, self.angle, bridge_opacity);
+        a.ship(g, time, self.angle, hovered_tile);
+        for (g.vessels(), 0..) |_, id| a.explorationShip(g, id, time, self.angle, hovered_tile);
+
+        if (picked) |hit| {
+            if (tool != .plaza and s.depth(hit.cell, hit.chart) >= 0) {
+                const scale = s.geography.tile_scale;
+                a.tileOutline(hovered_tile.?, s.tile_width * scale, s.tile_height * scale, 1 / self.zoom, 0xffdc95);
+            }
+        }
     }
 };
 
@@ -166,10 +236,23 @@ pub fn portPosition(chart: usize) a.V {
 }
 
 pub fn pickIsland(world: a.V, zoom: f32, game: *const s.Game) ?usize {
+    const ports = chartedPorts(game);
+    return pickMappedIsland(world, zoom, &ports);
+}
+
+const Ports = [s.settlement_count]bool;
+
+fn chartedPorts(game: *const s.Game) Ports {
+    var ports: Ports = undefined;
+    for (&ports, 0..) |*visible, chart| visible.* = game.islandOpen(chart);
+    return ports;
+}
+
+fn pickMappedIsland(world: a.V, zoom: f32, ports: *const Ports) ?usize {
     var nearest: ?usize = null;
     var distance = port_hit_radius / zoom;
     for (0..s.settlement_count) |chart| {
-        if (!game.islandOpen(chart)) continue;
+        if (!ports[chart]) continue;
         const gap = r.math.vector2Distance(portPosition(chart), world);
         if (gap < distance) {
             nearest = chart;
@@ -180,7 +263,7 @@ pub fn pickIsland(world: a.V, zoom: f32, game: *const s.Game) ?usize {
 
     for (region.islands) |island| {
         const chart = island.settlement();
-        if (!game.islandOpen(chart)) continue;
+        if (!ports[chart]) continue;
         const min = a.chartPoint(island.bounds[0]);
         const max = a.chartPoint(island.bounds[1]);
         if (world.x < min.x or world.y < min.y or world.x > max.x or world.y > max.y) continue;
@@ -198,47 +281,137 @@ pub fn drawPortPin(at: a.V, selected: bool, hovered: bool) void {
     if (hovered) r.drawCircleLinesV(at, 8, a.c(0xfff0cd));
 }
 
+pub const ExpeditionPin = enum { departure, charted, survey, return_only };
+
+pub fn expeditionPin(game: *const s.Game, ship_id: usize, target: usize) ?ExpeditionPin {
+    if (ship_id >= game.fleet.count) return null;
+    const vessel = game.fleet.vessels[ship_id];
+    if (vessel.phase != .docked) return null;
+    if (target == vessel.chart) return .departure;
+    const survey = !game.islandOpen(target);
+    const route = s.ocean.destinationIndex(target);
+    if (game.expeditionProblem(ship_id, route, survey) == null) return if (survey) .survey else .charted;
+    if (target == vessel.origin and game.returnExpeditionProblem(ship_id) == null) return .return_only;
+    return null;
+}
+
+pub fn drawExpeditionPin(at: a.V, pin: ExpeditionPin, hovered: bool) void {
+    if (hovered) r.drawCircleLinesV(at, 10, a.c(0xfff0cd));
+    switch (pin) {
+        .departure => {
+            a.diamond(at.x, at.y, 8, 8, 0x233f40);
+            a.diamond(at.x, at.y, 5.5, 5.5, 0xe2b66d);
+        },
+        .charted => {
+            r.drawCircleV(at, 6.5, a.c(0x233f40));
+            r.drawCircleV(at, 4.5, a.c(0xfff0cd));
+        },
+        .survey => {
+            r.drawCircleV(at, 6.5, a.c(0x233f40));
+            r.drawCircleV(at, 4.5, a.c(0xfff0cd));
+            r.drawCircleV(at, 2.75, a.c(0x233f40));
+        },
+        .return_only => {
+            r.drawCircleV(at, 6.5, a.c(0x233f40));
+            r.drawCircleV(at, 4.5, a.c(0xa6e0dd));
+            a.line(a.v(at.x - 2.5, at.y), a.v(at.x + 2.5, at.y), 1.8, 0x233f40);
+        },
+    }
+}
+
 pub const Overview = struct {
     bounds: r.Rectangle,
     zoom: f32,
+    map_center: a.V = regional_center,
+    drag: ?struct { pointer: a.V, map_center: a.V, moved: bool = false } = null,
 
     pub fn init(bounds: r.Rectangle) Overview {
         return .{ .bounds = bounds, .zoom = @min(bounds.width / regional_width, bounds.height / regional_height) };
     }
 
-    fn center(self: Overview) a.V {
+    pub fn center(self: Overview) a.V {
         return a.v(self.bounds.x + self.bounds.width / 2, self.bounds.y + self.bounds.height / 2);
     }
 
     pub fn project(self: Overview, position: a.V) a.V {
         const mid = self.center();
-        return a.v(mid.x + (position.x - regional_center.x) * self.zoom, mid.y + (position.y - regional_center.y) * self.zoom);
+        return a.v(mid.x + (position.x - self.map_center.x) * self.zoom, mid.y + (position.y - self.map_center.y) * self.zoom);
     }
 
     fn world(self: Overview, screen: a.V) a.V {
         const mid = self.center();
-        return a.v(regional_center.x + (screen.x - mid.x) / self.zoom, regional_center.y + (screen.y - mid.y) / self.zoom);
+        return a.v(self.map_center.x + (screen.x - mid.x) / self.zoom, self.map_center.y + (screen.y - mid.y) / self.zoom);
     }
 
     pub fn pick(self: Overview, screen: a.V, game: *const s.Game) ?usize {
+        const ports = chartedPorts(game);
+        return self.pickPorts(screen, &ports);
+    }
+
+    pub fn pickPorts(self: Overview, screen: a.V, ports: *const Ports) ?usize {
         if (!r.checkCollisionPointRec(screen, self.bounds)) return null;
-        return pickIsland(self.world(screen), self.zoom, game);
+        return pickMappedIsland(self.world(screen), self.zoom, ports);
+    }
+
+    fn clampCenter(self: *Overview) void {
+        const x = @max(0, (regional_width - self.bounds.width / self.zoom) / 2);
+        const y = @max(0, (regional_height - self.bounds.height / self.zoom) / 2);
+        self.map_center.x = std.math.clamp(self.map_center.x, regional_center.x - x, regional_center.x + x);
+        self.map_center.y = std.math.clamp(self.map_center.y, regional_center.y - y, regional_center.y + y);
+    }
+
+    pub fn zoomAt(self: *Overview, anchor: a.V, factor: f32) void {
+        const fit = init(self.bounds).zoom;
+        const before = self.world(anchor);
+        self.zoom = std.math.clamp(self.zoom * factor, fit, fit * 12);
+        const after = self.world(anchor);
+        self.map_center.x += before.x - after.x;
+        self.map_center.y += before.y - after.y;
+        self.clampCenter();
+    }
+
+    pub fn input(self: *Overview, mouse: a.V) bool {
+        const inside = r.checkCollisionPointRec(mouse, self.bounds);
+        if (inside) {
+            const wheel = r.getMouseWheelMove();
+            if (wheel != 0) self.zoomAt(mouse, std.math.pow(f32, 1.24, wheel));
+            if (r.isMouseButtonPressed(.left)) self.drag = .{ .pointer = mouse, .map_center = self.map_center };
+        }
+        if (self.drag) |*drag| {
+            const dx = mouse.x - drag.pointer.x;
+            const dy = mouse.y - drag.pointer.y;
+            drag.moved = drag.moved or dx * dx + dy * dy > 16;
+            if (drag.moved) {
+                self.map_center = a.v(drag.map_center.x - dx / self.zoom, drag.map_center.y - dy / self.zoom);
+                self.clampCenter();
+            }
+            if (!r.isMouseButtonDown(.left)) {
+                const clicked = inside and !drag.moved and r.isMouseButtonReleased(.left);
+                self.drag = null;
+                return clicked;
+            }
+        }
+        return false;
+    }
+
+    pub fn drawLand(self: Overview) void {
+        const bounds = self.bounds;
+        a.rect(bounds.x, bounds.y, bounds.width, bounds.height, 0x40787a);
+        r.gl.rlPushMatrix();
+        defer r.gl.rlPopMatrix();
+        const mid = self.center();
+        r.gl.rlTranslatef(mid.x, mid.y, 0);
+        r.gl.rlScalef(self.zoom, self.zoom, 1);
+        r.gl.rlTranslatef(-self.map_center.x, -self.map_center.y, 0);
+        a.regionalLand(self.world(a.v(bounds.x, bounds.y)), self.world(a.v(bounds.x + bounds.width, bounds.y + bounds.height)), .north);
     }
 
     pub fn draw(self: Overview, view: View, game: *const s.Game, selected: usize, hovered: ?usize) void {
+        self.drawLand();
         const bounds = self.bounds;
-        a.rect(bounds.x, bounds.y, bounds.width, bounds.height, 0x40787a);
-        {
-            r.gl.rlPushMatrix();
-            defer r.gl.rlPopMatrix();
-            const mid = self.center();
-            r.gl.rlTranslatef(mid.x, mid.y, 0);
-            r.gl.rlScalef(self.zoom, self.zoom, 1);
-            r.gl.rlTranslatef(-regional_center.x, -regional_center.y, 0);
-            a.regionalLand(self.world(a.v(bounds.x, bounds.y)), self.world(a.v(bounds.x + bounds.width, bounds.y + bounds.height)));
-        }
-        const top = self.project(view.world(a.v(0, 84)));
-        const bottom = self.project(view.world(a.v(895, 576)));
+        const viewport = view.worldBounds();
+        const top = self.project(viewport.min);
+        const bottom = self.project(viewport.max);
         const x1 = @max(bounds.x + 1, top.x);
         const y1 = @max(bounds.y + 1, top.y);
         const x2 = @min(bounds.x + bounds.width - 1, bottom.x);
@@ -251,6 +424,66 @@ pub const Overview = struct {
         }
     }
 };
+
+test "expedition overview offers only destinations the selected ship can sail to" {
+    var game = s.Game.init();
+    game.chartHarbor(1);
+    game.chartHarbor(2);
+    game.chartHarbor(27);
+    game.bridges[0] = true;
+    game.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    game.people = 10;
+    game.island_people[0] = 6;
+    game.store(1).* = .{ .grain = 90, .venison = 90, .fruit = 90, .water = 90 };
+    game.fleet.count = 1;
+    game.fleet.vessels[0] = .{ .ship = .brig, .chart = 1 };
+    try std.testing.expectEqual(@as(?ExpeditionPin, .departure), expeditionPin(&game, 0, 1));
+    try std.testing.expectEqual(@as(?ExpeditionPin, .survey), expeditionPin(&game, 0, 25));
+    try std.testing.expectEqual(@as(?ExpeditionPin, .charted), expeditionPin(&game, 0, 27));
+    try std.testing.expect(expeditionPin(&game, 0, 0) == null); // The ferry occupies Java's berth.
+    try std.testing.expect(expeditionPin(&game, 0, s.geography.sumatra) == null);
+    game.fleet.vessels[0].ship = .barque;
+    try std.testing.expectEqual(@as(?ExpeditionPin, .survey), expeditionPin(&game, 0, s.geography.sumatra));
+    game.fleet.vessels[0].ship = .brig;
+    game.store(1).water = 0;
+    try std.testing.expect(expeditionPin(&game, 0, 27) == null);
+    game.store(1).water = 90;
+
+    var map = Overview.init(.{ .x = 211, .y = 319, .width = 779, .height = 318 });
+    var available: Ports = undefined;
+    for (&available, 0..) |*port, island| port.* = expeditionPin(&game, 0, island) != null;
+    for (available, 0..) |visible, island| {
+        if (visible) try std.testing.expectEqual(@as(?usize, island), map.pickPorts(map.project(portPosition(island)), &available));
+    }
+    const sumatra = map.project(portPosition(s.geography.sumatra));
+    try std.testing.expect(map.pickPorts(sumatra, &available) == null);
+    const survey_pin = map.project(portPosition(25));
+    try std.testing.expect(map.pick(survey_pin, &game) == null);
+    for (region.islands) |island| {
+        if (island.settlement() != s.geography.borneo) continue;
+        const triangle = island.triangles[0];
+        const p = a.chartPoint(island.coast[triangle[0]]);
+        const q = a.chartPoint(island.coast[triangle[1]]);
+        const r0 = a.chartPoint(island.coast[triangle[2]]);
+        const inland = map.project(a.v((p.x + q.x + r0.x) / 3, (p.y + q.y + r0.y) / 3));
+        try std.testing.expectEqual(@as(?usize, s.geography.borneo), map.pickPorts(inland, &available));
+    }
+    map.zoomAt(survey_pin, 3);
+    try std.testing.expectEqual(@as(?usize, 25), map.pickPorts(survey_pin, &available));
+    try std.testing.expect(map.pickPorts(a.v(210, survey_pin.y), &available) == null);
+
+    // A brig without enough reserves for a new voyage can still use a stocked port to return.
+    game.chartHarbor(25);
+    game.fleet.vessels[0] = .{ .ship = .brig, .chart = 25 };
+    game.store(25).* = .{ .grain = 8, .venison = 8, .fruit = 8, .water = 8 };
+    try std.testing.expect(expeditionPin(&game, 0, 0) == null);
+    game.ferry = .{ .origin = 1, .destination = 1, .surveyed = true };
+    try std.testing.expectEqual(@as(?ExpeditionPin, .return_only), expeditionPin(&game, 0, 0));
+    game.fleet.vessels[0].provisions = 8;
+    game.store(25).* = .{};
+    try std.testing.expectEqual(@as(?ExpeditionPin, .charted), expeditionPin(&game, 0, 0));
+    try std.testing.expectEqual(@as(?ExpeditionPin, .survey), expeditionPin(&game, 0, s.geography.sumatra));
+}
 
 test "zoom and pan preserve picking for every buildable island tile" {
     var g = s.Game.init();
@@ -266,6 +499,59 @@ test "zoom and pan preserve picking for every buildable island tile" {
                 try std.testing.expectEqualDeep(Hit{ .chart = chart, .cell = cell }, view.pick(screen, &g).?);
             };
         }
+    }
+}
+
+test "quarter turns keep the focus and pick the same tiles from each side" {
+    var game = s.Game.init();
+    game.ferry.surveyed = true;
+    game.fleet.charted = @splat(true);
+    const turns = [_]a.Orientation{ .north, .east, .south, .west };
+    const step_x = [_]f32{ 1, -1, -1, 1 };
+    const step_y = [_]f32{ 1, 1, -1, -1 };
+
+    for (0..s.settlement_count) |chart| {
+        const center = portPosition(chart);
+        var view = View{ .center = center, .zoom = 3.4 };
+        const quay = s.quay(chart);
+        const grid = s.geography.grids[chart];
+        for (turns, step_x, step_y) |turn, dx, dy| {
+            try std.testing.expectEqual(turn, view.angle);
+            try std.testing.expectEqualDeep(center, view.center);
+            try std.testing.expectEqualDeep(middle, view.project(center));
+            const next = view.project(a.worldPoint(chart, a.tile(.{ .x = quay.x + 1, .y = quay.y })));
+            const scale = view.zoom * s.geography.tile_scale;
+            try std.testing.expectApproxEqAbs(middle.x + dx * s.tile_width * scale, next.x, 0.002);
+            try std.testing.expectApproxEqAbs(middle.y + dy * s.tile_height * scale, next.y, 0.002);
+
+            for (quay.y -| 2..@min(quay.y + 3, grid.height)) |y| {
+                for (quay.x -| 2..@min(quay.x + 3, grid.width)) |x| {
+                    const cell = s.Cell{ .x = x, .y = y };
+                    if (s.depth(cell, chart) < 0) continue;
+                    const screen = view.project(a.worldPoint(chart, a.tile(cell)));
+                    try std.testing.expectEqualDeep(Hit{ .chart = chart, .cell = cell }, view.pick(screen, &game).?);
+                }
+            }
+            view.rotate(true);
+        }
+        try std.testing.expectEqual(a.Orientation.north, view.angle);
+        view.rotate(false);
+        try std.testing.expectEqual(a.Orientation.west, view.angle);
+    }
+}
+
+test "the top tile places the same four plaza tiles from every angle" {
+    const anchor = s.Cell{ .x = 45, .y = 42 };
+    const cells = s.plazaCells(anchor);
+    var view = View{};
+    for (0..4) |_| {
+        var top = cells[0];
+        for (cells[1..]) |cell| {
+            const screen = view.project(a.worldPoint(0, a.tile(cell)));
+            if (screen.y < view.project(a.worldPoint(0, a.tile(top))).y) top = cell;
+        }
+        try std.testing.expectEqualDeep(anchor, view.plazaAnchor(top).?);
+        view.rotate(true);
     }
 }
 

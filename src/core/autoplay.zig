@@ -104,6 +104,10 @@ pub const Player = struct {
         return domain.site(cell, chart) == .plain and !domain.forest(cell, chart);
     }
 
+    fn lighthouseGround(_: *const Player, chart: usize, cell: Cell) bool {
+        return domain.lighthouseSite(cell, chart) and domain.site(cell, chart) != .fruit;
+    }
+
     fn wellGround(p: *const Player, chart: usize, cell: Cell) bool {
         _ = p;
         return domain.wellSite(cell, chart);
@@ -301,7 +305,8 @@ pub const Player = struct {
             }
         }
         if (!g.charter.won and g.coins >= 30 and g.people >= 8 and p.timber(bali) >= domain.costs[@backingInt(Kind.light)]) {
-            _ = p.placeOnOpenGround(bali, .light);
+            const site = p.nearest(bali, lighthouseGround) orelse return;
+            _ = p.build(bali, site, .light);
         }
     }
 

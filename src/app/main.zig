@@ -11,6 +11,7 @@ const gameplay_trace = @import("shell").gameplay_trace;
 const queries = @import("core").queries;
 const diagnostics = @import("shell").diagnostics;
 const audio = @import("audio.zig");
+const town_text = @import("town_text.zig");
 pub const panic = std.debug.FullPanic(diagnostics.crash);
 pub const std_options: std.Options = .{ .logFn = diagnostics.log };
 const save = @import("core").save;
@@ -25,12 +26,14 @@ const paper = 0xf2ebd9;
 const muted = 0x526960;
 const gold = 0xe2b66d;
 const island_field = r.Rectangle{ .x = 350, .y = 9, .width = 210, .height = 25 };
+const town_name_field = r.Rectangle{ .x = 340, .y = 349, .width = 520, .height = 43 };
 const island_row_height: f32 = 30;
 const island_menu_rows = 8;
 const inset = chart_view.Overview.init(.{ .x = 670, .y = 411, .width = 210, .height = 151 });
 const inset_panel = r.Rectangle{ .x = 665, .y = 387, .width = 220, .height = 180 };
 const inset_hide = r.Rectangle{ .x = 828, .y = 389, .width = 52, .height = 20 };
 const inset_show = r.Rectangle{ .x = 731, .y = 535, .width = 154, .height = 32 };
+const expedition_map_bounds = r.Rectangle{ .x = 211, .y = 319, .width = 779, .height = 318 };
 var sans: r.Font = undefined;
 var serif: r.Font = undefined;
 var mouse: a.V = undefined;
@@ -64,10 +67,10 @@ fn warningColor(pulse_elapsed: f32) u32 {
     return 0xff0000 | (green << 8) | blue;
 }
 
-fn compass(x: f32, y: f32, sz: f32) void {
+fn compass(x: f32, y: f32, sz: f32, angle: a.Orientation) void {
     r.drawCircleLinesV(a.v(x, y), sz * 0.74, a.c(0xc4d5be));
     for (0..4) |i| {
-        const theta = a.f(i) * std.math.pi / 2;
+        const theta = a.f(i + @as(usize, @backingInt(angle))) * std.math.pi / 2;
         const dx = @sin(theta);
         const dy = -@cos(theta);
         const tip = a.v(x + dx * sz, y + dy * sz);
@@ -75,12 +78,12 @@ fn compass(x: f32, y: f32, sz: f32) void {
         a.tri(tip, a.v(x + dy * 4, y - dx * 4), a.v(x, y), 0x315c5a);
     }
 }
-const opts = [_]s.Kind{ .cottage, .grove, .farm, .light, .road, .quarry, .lodge, .well };
-const desc = [_][:0]const u8{ "Houses 4", "Up to 3 timber", "+5 grain/day", "Bali", "Connects paths", "+3 stone/day", "Up to 3 venison", "Up to 4 water" };
-const keys = [_]r.KeyboardKey{ .one, .two, .three, .four, .five, .six, .seven, .eight };
+const opts = [_]s.Kind{ .cottage, .grove, .farm, .light, .road, .quarry, .lodge, .well, .apartment, .plaza };
+const desc = [_][:0]const u8{ "", "3 timber max", "+5 grain/day", "+1 berth", "Links paths", "+3 stone/day", "3 meat max", "4 water max", "", "Unlocks apts" };
+const keys = [_]r.KeyboardKey{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine, .zero };
 const camp_supplies = s.Stores{ .timber = 19, .stone = 4, .grain = 6, .venison = 6, .fruit = 6, .water = 6 };
 const supply_names = [_][:0]const u8{ "Timber", "Stone", "Grain", "Venison", "Fruit", "Water" };
-const Modal = enum { none, restart, bridge, shipyard, manifest };
+const Modal = enum { none, restart, bridge, shipyard, manifest, expedition_return, town_name };
 const ShipyardTab = enum { ferry, expedition, build };
 /// What the manifest dialog loads: the ferry bound for a harbor or an
 /// expedition on a route.
@@ -103,13 +106,17 @@ const UI = struct {
     preserve_unreadable_save: bool = false,
     modal: Modal = .none,
     modal_note: ?[:0]const u8 = null,
+    town_chart: usize = 0,
+    town_editor: town_text.Editor = .{},
+    town_renderer: town_text.Renderer = .{},
     store_chart: usize = 0,
     island_menu_open: bool = false,
     island_offset: usize = 0,
     island_cursor: usize = 0,
     inset_collapsed: bool = false,
     shipyard_tab: ShipyardTab = .ferry,
-    shipyard_page: usize = 0,
+    ferry_page: usize = 0,
+    expedition_map: chart_view.Overview = .init(expedition_map_bounds),
     ship_id: usize = 0,
     /// The bridge the bridge dialog shows, an index into `s.crossings`.
     crossing: usize = s.strait,
@@ -150,15 +157,16 @@ const UI = struct {
         u.speed = saved.speed;
         u.view = .{};
         u.ship_id = 0;
-        if (u.g.fleet.count > 0 and u.g.fleet.vessels[0].chart != 0) {
-            const vessel = u.g.fleet.vessels[0];
-            if (vessel.phase == .docked) u.selectIsland(vessel.chart, true) else u.watchExpedition(vessel.chart);
+        if (u.g.fleet.count > 0 and u.g.fleet.vessels[0].phase != .docked) {
+            u.view.showPassage(u.g.fleet.vessels[0]);
+        } else if (u.g.fleet.count > 0 and u.g.fleet.vessels[0].chart != 0) {
+            u.selectIsland(u.g.fleet.vessels[0].chart, true);
         } else if (u.g.mooredChart()) |chart| {
             u.selectIsland(if (chart == 0 and u.g.islandOpen(u.store_chart)) u.store_chart else chart, true);
         }
         u.tool = .empty;
         u.shipyard_tab = if (u.g.charterComplete()) .expedition else .ferry;
-        u.shipyard_page = 0;
+        u.expedition_map = .init(expedition_map_bounds);
         u.last_saved = null;
         u.autosave_time = 0;
         u.elapsed = 0;
@@ -228,7 +236,63 @@ const UI = struct {
         }
     }
 
+    fn openTownName(u: *UI, chart: usize) void {
+        u.town_chart = chart;
+        u.town_editor = .init(u.g.town_names[chart]);
+        u.modal = .town_name;
+        u.modal_note = null;
+        const field = town_name_field;
+        browser.openTownName(u.town_editor.draft.text(), s.town_name_limit, field.x, field.y, field.width, field.height);
+    }
+
+    fn townNameDialog(u: *UI) void {
+        const editor = &u.town_editor;
+        if (browser.enabled) {
+            editor.replaceText(browser.townNameText());
+        } else {
+            editor.keyboard();
+        }
+        const action = browser.townNameAction();
+        const renaming = u.g.townName(u.town_chart) != null;
+        a.rect(310, 246, 580, 256, paper);
+        a.rect(310, 246, 580, 6, gold);
+        label(if (renaming) "Rename town" else "Name your town", 340, 270, 36, ink, true);
+        label(s.chart_names[u.town_chart], 341, 318, 17, muted, false);
+        if (!browser.enabled) {
+            const field = town_name_field;
+            a.rect(field.x, field.y, field.width, field.height, muted);
+            a.rect(field.x + 1, field.y + 1, field.width - 2, field.height - 2, if (editor.select_all) 0xd4dfc8 else 0xfff7e1);
+            const caret = u.town_renderer.draw(sans, editor.draft.text(), a.v(352, 356), 24, 492, a.c(ink), editor.caret);
+            if (!editor.select_all) a.line(a.v(caret, 358), a.v(caret, 381), 1, ink);
+        }
+        num("{d} / {d}", .{ editor.count(), s.town_name_limit }, 791, 398, 16, muted);
+        if (u.modal_note) |note| label(note, 341, 398, 16, 0x8b4235, false);
+
+        if (button(if (renaming) "Cancel" else "Later", 594, 443, 105, 38) or action == .cancel or r.isKeyPressed(.escape)) {
+            u.closeModal();
+            return;
+        }
+        if (button("Save name", 711, 443, 149, 38) or action == .submit or r.isKeyPressed(.enter) or r.isKeyPressed(.kp_enter)) {
+            const name = s.TownName.parse(editor.draft.text()) orelse {
+                u.modal_note = "Enter a name from 1 to 30 characters.";
+                return;
+            };
+            const result = u.dispatch(.{ .rename_town = .{ .island = u.town_chart, .name = name } });
+            if (result.problem()) |problem| {
+                u.modal_note = problem;
+                return;
+            }
+            u.selectIsland(u.town_chart, false);
+            u.msg = "Town name saved. Inspect a town square to rename it.";
+            u.saveNow(false) catch {
+                u.msg = "Town named. The harbor ledger could not be saved yet.";
+            };
+            u.closeModal();
+        }
+    }
+
     fn closeModal(u: *UI) void {
+        if (u.modal == .town_name) browser.closeTownName();
         u.modal = .none;
         u.modal_note = null;
     }
@@ -394,7 +458,7 @@ const UI = struct {
         switch (passage) {
             .ferry => |voyage| u.cargo_manifest = u.g.ferryCampSupplies(voyage.to, u.boarding, voyage.survey),
             .expedition => |voyage| {
-                const chart = s.ocean.routes[voyage.to].chart;
+                const chart = s.ocean.destinationChart(voyage.to);
                 if (u.boarding > 0 and u.g.residents(chart) == 0) u.cargo_manifest = camp_supplies;
             },
         }
@@ -433,11 +497,11 @@ const UI = struct {
         const loading = u.loading;
         const source = switch (loading) {
             .ferry => u.g.mooredChart() orelse u.g.ferry.origin,
-            .expedition => 0,
+            .expedition => u.g.fleet.vessels[u.ship_id].chart,
         };
         const target = switch (loading) {
             .ferry => |voyage| voyage.to,
-            .expedition => |voyage| s.ocean.routes[voyage.to].chart,
+            .expedition => |voyage| s.ocean.destinationChart(voyage.to),
         };
         const survey = switch (loading) {
             .ferry, .expedition => |voyage| voyage.survey,
@@ -449,7 +513,7 @@ const UI = struct {
 
         a.rect(194, 76, 812, 608, paper);
         a.rect(194, 76, 812, 6, gold);
-        label(if (survey) "Survey and settle" else "Load and board", 226, 102, 35, ink, true);
+        label(if (survey) "Survey and settle" else if (loading == .expedition) "Expedition manifest" else "Load and board", 226, 102, 35, ink, true);
         num("{s} to {s}   /   {s}", .{
             s.chart_names[source], s.chart_names[target],
             switch (loading) {
@@ -463,15 +527,16 @@ const UI = struct {
         };
         label("Settlers aboard", 226, 192, 20, ink, false);
         u.slider(0, 203, &u.boarding, boarding_limit);
-        const rations: s.Stores = switch (loading) {
-            .ferry => u.g.ferryProvisions(source, target, u.boarding),
-            .expedition => |voyage| u.g.oceanRations(u.ship_id, voyage.to, u.boarding),
+        const provisions = switch (loading) {
+            .ferry => null,
+            .expedition => |voyage| u.g.oceanProvisioning(u.ship_id, voyage.to, u.boarding),
         };
+        const ration_units = if (provisions) |plan| plan.holdUnits() else u.g.ferryProvisions(source, target, u.boarding).units();
         const limits = switch (loading) {
             .ferry => u.g.ferryCargoLimit(target, u.boarding),
             .expedition => |voyage| u.g.oceanCargoLimit(u.ship_id, voyage.to, u.boarding),
         };
-        const room = hold -| rations.units();
+        const room = hold -| ration_units;
         var remaining = room;
         // Preserve landing rations first when boarding more settlers reduces space for cargo.
         inline for (.{ "water", "grain", "venison", "fruit", "stone", "timber" }) |field| {
@@ -480,14 +545,14 @@ const UI = struct {
             remaining -= amount.*;
         }
         a.rect(226, 283, 747, 1, 0xcac9b4);
-        if (survey and loading == .expedition) {
-            num("Survey rations   {d} each   /   settlers and supplies land once {s} is charted", .{ rations.grain, s.chart_names[target] }, 226, 226, 17, muted);
+        if (provisions) |plan| {
+            num("{s}   /   {d} each already aboard   /   {d} each from port", .{
+                if (plan.one_way) "One-way provisions" else "Voyage provisions", plan.aboard, plan.fromPort(),
+            }, 226, 226, 17, muted);
         } else if (survey) {
-            num("Voyage rations   {d} grain or venison   /   20 coins   /   settlers land once {s} is charted", .{ rations.units(), s.chart_names[target] }, 226, 226, 17, muted);
-        } else if (loading == .expedition) {
-            num("Voyage rations   {d} each of grain, venison, fruit, and water", .{rations.grain}, 226, 226, 17, muted);
+            num("Voyage rations   {d} grain or venison   /   20 coins   /   settlers land once {s} is charted", .{ ration_units, s.chart_names[target] }, 226, 226, 17, muted);
         } else {
-            num("Voyage rations   {d} grain or venison", .{rations.units()}, 226, 226, 17, muted);
+            num("Voyage rations   {d} grain or venison", .{ration_units}, 226, 226, 17, muted);
         }
         inline for (s.store_fields, supply_names, 0..) |field, name, i| {
             const y = 312 + a.f(i) * 44;
@@ -499,7 +564,7 @@ const UI = struct {
             a.rect(226, y + 22, 747, 1, 0xd9d4c1);
         }
         num("Hold   {d} / {d} units   /   {d} cargo + {d} rations", .{
-            u.cargo_manifest.units() + rations.units(), hold, u.cargo_manifest.units(), rations.units(),
+            u.cargo_manifest.units() + ration_units, hold, u.cargo_manifest.units(), ration_units,
         }, 226, 253, 18, ink);
         if (u.modal_note) |note| label(note, 226, 573, 17, 0x8b4235, false);
         if (button("Back", 226, 623, 114, 37) or r.isKeyPressed(.escape)) {
@@ -508,8 +573,12 @@ const UI = struct {
             return;
         }
         const caption = if (survey) "Launch survey" else "Launch voyage";
-        if (button(caption, 808, 623, 165, 37)) {
-            const manifest: gameplay.Manifest = .{ .settlers = u.boarding, .cargo = u.cargo_manifest };
+        const empty_sailing = loading == .expedition and !survey and button("Sail empty", 662, 623, 130, 37);
+        if (button(caption, 808, 623, 165, 37) or empty_sailing) {
+            const manifest: gameplay.Manifest = if (empty_sailing)
+                .{ .settlers = 0, .cargo = .{} }
+            else
+                .{ .settlers = u.boarding, .cargo = u.cargo_manifest };
             const failure = switch (loading) {
                 .ferry => |voyage| u.dispatch(if (voyage.survey)
                     .{ .survey_harbor = .{ .destination = target, .manifest = manifest } }
@@ -528,7 +597,7 @@ const UI = struct {
             u.closeModal();
             switch (loading) {
                 .ferry => u.view = .{},
-                .expedition => |voyage| u.view.showExpedition(voyage.to),
+                .expedition => u.view.showPassage(u.g.fleet.vessels[u.ship_id]),
             }
             u.playCue(.sail);
             if (survey) {
@@ -539,8 +608,8 @@ const UI = struct {
         }
     }
 
-    fn shipyardDialog(u: *UI) void {
-        a.rect(177, 83, 846, 591, paper);
+    fn shipyardDialog(u: *UI, offset: a.V, scale: f32) void {
+        a.rect(177, 83, 846, 632, paper);
         a.rect(177, 83, 846, 6, gold);
         label("Shipyard", 211, 105, 39, ink, true);
         if (button("Close", 882, 110, 108, 35) or r.isKeyPressed(.escape)) {
@@ -563,17 +632,17 @@ const UI = struct {
         a.rect(211, 208, 779, 1, 0xcac9b4);
         switch (u.shipyard_tab) {
             .ferry => u.shipyardFerry(),
-            .expedition => u.shipyardExpedition(),
+            .expedition => if (u.shipyardExpedition(offset, scale)) return,
             .build => u.shipyardBuild(),
         }
-        if (u.modal_note) |note| label(note, 211, 574, 17, 0x8b4235, false);
-        a.rect(211, 609, 779, 1, 0xcac9b4);
-        num("Ferry {d} units", .{s.ferry_hold}, 211, 622, 17, ink);
-        num("Brig {d} units", .{s.ocean.Ship.brig.hold()}, 471, 622, 17, ink);
-        num("Barque {d} units", .{s.ocean.Ship.barque.hold()}, 731, 622, 17, ink);
-        label("Harbors in range", 211, 645, 14, muted, false);
-        label("Nearby islands", 471, 645, 14, muted, false);
-        label("All expedition destinations", 731, 645, 14, muted, false);
+        if (u.modal_note) |note| label(note, 211, 613, 17, 0x8b4235, false);
+        a.rect(211, 648, 779, 1, 0xcac9b4);
+        num("Ferry {d} units", .{s.ferry_hold}, 211, 661, 17, ink);
+        num("Brig {d} units", .{s.ocean.Ship.brig.hold()}, 471, 661, 17, ink);
+        num("Barque {d} units", .{s.ocean.Ship.barque.hold()}, 731, 661, 17, ink);
+        label("Harbors in range", 211, 684, 14, muted, false);
+        label("Nearby islands", 471, 684, 14, muted, false);
+        label("Longer passages", 731, 684, 14, muted, false);
     }
 
     fn shipyardFerry(u: *UI) void {
@@ -588,17 +657,29 @@ const UI = struct {
             }
             return;
         };
-        num("Moored at {s}   /   {d} settlers ashore   /   harbors in range", .{ s.chart_names[source], u.g.residents(source) }, 211, 305, 18, ink);
-        const near = s.ferry.neighbors(source);
-        const rows = @min(near.len, 5);
-        for (near.slice()[0..rows], 0..) |target, row| {
+        num("Moored at {s}   /   {d} settlers ashore", .{ s.chart_names[source], u.g.residents(source) }, 211, 305, 18, ink);
+        const destinations = u.g.ferryDestinations();
+        if (destinations.len == 0) {
+            label("No ferry destinations available. Check harbor berths and survey requirements.", 211, 345, 17, muted, false);
+            return;
+        }
+        const rows_per_page = 5;
+        const last_page = (destinations.len - 1) / rows_per_page;
+        u.ferry_page = @min(u.ferry_page, last_page);
+        if (last_page > 0) {
+            if (u.ferry_page > 0 and button("Previous", 732, 569, 92, 29)) u.ferry_page -= 1;
+            if (u.ferry_page < last_page and button("Next", 917, 569, 73, 29)) u.ferry_page += 1;
+            num("{d} / {d}", .{ u.ferry_page + 1, last_page + 1 }, 850, 575, 16, ink);
+        }
+        const first = u.ferry_page * rows_per_page;
+        for (destinations.slice()[first..@min(first + rows_per_page, destinations.len)], 0..) |target, row| {
             const y = 335 + a.f(row) * 46;
             a.rect(211, y - 4, 779, 1, 0xd9d4c1);
             num("{s}", .{s.chart_names[target]}, 211, y + 4, 20, ink);
             const leg = s.ferry.legSeconds(source, target);
             if (u.g.islandOpen(target)) {
                 num("{d:.1} s   /   {d} places   /   {d} free berths", .{
-                    leg, u.g.freeLandingSpace(target), s.dock_capacity - @min(s.dock_capacity, u.g.berthsUsed(target)),
+                    leg, u.g.freeLandingSpace(target), u.g.freeBerths(target),
                 }, 371, y + 7, 15, muted);
                 if (button("Sail empty", 676, y, 110, 34)) {
                     if (u.dispatch(.{ .sail_ferry = target }).problem()) |reason| {
@@ -619,11 +700,6 @@ const UI = struct {
             } else {
                 num("{d:.1} s   /   not yet charted", .{leg}, 371, y + 7, 15, muted);
                 if (button("Survey   /   20 coins", 798, y, 192, 34)) {
-                    if (u.g.ferrySurveyProblem(target)) |reason| {
-                        u.playCue(.denied);
-                        u.modal_note = reason;
-                        return;
-                    }
                     u.openManifest(.{ .ferry = .{ .to = target, .survey = true } });
                     return;
                 }
@@ -631,20 +707,19 @@ const UI = struct {
         }
     }
 
-    fn watchExpedition(u: *UI, chart: usize) void {
-        if (s.ocean.routeTo(chart)) |index| u.view.showExpedition(index) else u.view = .{};
-    }
-
     fn shipyardBuild(u: *UI) void {
         const chart = u.store_chart;
         num("Ship construction at {s}", .{s.chart_names[chart]}, 211, 220, 25, ink);
-        num("Dock berths   {d} / {d} occupied or reserved", .{ u.g.berthsUsed(chart), s.dock_capacity }, 211, 256, 18, muted);
+        const berth_capacity = u.g.berthCapacity(chart);
+        const used = u.g.berthsUsed(chart);
+        num("Dock berths   {d} / {d} occupied or reserved", .{ used, berth_capacity }, 211, 256, 18, muted);
+        if (berth_capacity == 1) label("A lighthouse adds a second berth.", 679, 256, 17, muted, false);
         if (!u.g.charterComplete()) {
-            label("Complete the Bali landing, lighthouse, and bridge to unlock ship construction.", 211, 300, 18, muted, false);
+            label("Settle Bali, build its lighthouse, and bridge the strait to unlock ships.", 211, 300, 18, muted, false);
             return;
         }
         const stock = u.g.store(chart).*;
-        const full = u.g.berthsUsed(chart) >= s.dock_capacity;
+        const full = used >= berth_capacity;
         num("On hand   {d} timber   /   {d} stone   /   {d} coins", .{ stock.timber, stock.stone, u.g.coins }, 211, 284, 16, muted);
         for ([_]s.ocean.Ship{ .brig, .barque }, 0..) |ship, row| {
             const cost = s.shipCost(ship);
@@ -662,109 +737,183 @@ const UI = struct {
                     u.playCue(.build);
                     u.ship_id = u.g.fleet.count - 1;
                     u.shipyard_tab = .expedition;
+                    u.expedition_map = .init(expedition_map_bounds);
                 }
                 return;
             }
         }
     }
 
-    fn shipyardExpedition(u: *UI) void {
+    fn launchExpeditionReturn(u: *UI, target: usize) bool {
+        u.modal_note = u.dispatch(.{ .return_expedition = u.ship_id }).problem();
+        if (u.modal_note != null) {
+            u.playCue(.denied);
+            return false;
+        }
+        u.view.showPassage(u.g.fleet.vessels[u.ship_id]);
+        u.playCue(.sail);
+        u.setMessage("The expedition ship is returning to {s}.", .{s.chart_names[target]});
+        u.closeModal();
+        return true;
+    }
+
+    fn expeditionReturnDialog(u: *UI) void {
+        const vessel = u.g.fleet.vessels[u.ship_id];
+        a.rect(255, 230, 690, 255, paper);
+        a.rect(255, 230, 690, 6, gold);
+        var title: [64]u8 = undefined;
+        const caption = std.fmt.bufPrintSentinel(&title, "Return to {s}", .{s.chart_names[vessel.origin]}, 0) catch unreachable;
+        label(caption, 283, 257, 34, ink, true);
+        num("{s} to {s}   /   {d:.0} s", .{ s.chart_names[vessel.chart], s.chart_names[vessel.origin], vessel.legSeconds() }, 283, 309, 21, ink);
+        const from_port = vessel.returnProvisions() -| vessel.provisions;
+        if (from_port == 0) {
+            label("The crew will use the provisions already aboard.", 283, 355, 17, muted, false);
+        } else {
+            num("The crew will take {d} of each supply from {s}.", .{ from_port, s.chart_names[vessel.chart] }, 283, 355, 17, muted);
+        }
+        if (u.modal_note) |note| label(note, 283, 388, 17, 0x8b4235, false);
+        if (button("Back", 283, 425, 106, 36) or r.isKeyPressed(.escape)) {
+            u.modal = .shipyard;
+            u.modal_note = null;
+            return;
+        }
+        if (button("Set sail", 769, 425, 148, 36)) _ = u.launchExpeditionReturn(vessel.origin);
+    }
+
+    /// Returns whether the expedition view uses the footer for map details.
+    fn shipyardExpedition(u: *UI, offset: a.V, scale: f32) bool {
         if (u.g.fleet.count == 0) {
             label("No expedition ships", 211, 222, 27, ink, true);
             if (button("Build ships", 822, 231, 168, 37)) {
                 u.shipyard_tab = .build;
                 u.modal_note = null;
             }
-            return;
+            return false;
         }
         if (u.ship_id > 0 and button("Previous ship", 719, 214, 126, 29)) {
             u.ship_id -= 1;
             u.modal_note = null;
+            u.expedition_map = .init(expedition_map_bounds);
         }
         if (u.ship_id + 1 < u.g.fleet.count and button("Next ship", 865, 214, 125, 29)) {
             u.ship_id += 1;
             u.modal_note = null;
+            u.expedition_map = .init(expedition_map_bounds);
         }
         const vessel = u.g.fleet.vessels[u.ship_id];
         const ship = vessel.ship;
-        num("{s} #{d}   /   {d} ships", .{ ship.name(), u.ship_id + 1, u.g.fleet.count }, 211, 220, 23, ink);
-        const at_java = vessel.phase == .docked and vessel.chart == 0;
-        if (vessel.phase == .docked) {
-            num("Moored at {s}", .{s.chart_names[vessel.chart]}, 211, 256, 18, muted);
-            if (vessel.chart != 0 and button("Return to Java", 822, 249, 168, 34)) {
-                u.modal_note = u.dispatch(.{ .return_expedition = u.ship_id }).problem();
-                if (u.modal_note == null) {
-                    u.watchExpedition(vessel.chart);
-                    u.playCue(.sail);
-                    u.msg = "The expedition ship is sailing back to Java.";
-                    u.closeModal();
-                } else u.playCue(.denied);
-                return;
-            }
-            if (button("View port", 683, 249, 120, 34)) {
-                u.selectIsland(vessel.chart, true);
+        num("{s} #{d} of {d}", .{ ship.name(), u.ship_id + 1, u.g.fleet.count }, 211, 220, 23, ink);
+        if (vessel.phase != .docked) {
+            const from = if (vessel.phase == .homebound) vessel.chart else vessel.origin;
+            num("Under way   /   {s} to {s}", .{ s.chart_names[from], s.chart_names[vessel.berthChart()] }, 211, 256, 18, muted);
+            if (button("Watch voyage", 803, 249, 187, 34)) {
+                u.view.showPassage(vessel);
                 u.closeModal();
-                return;
             }
-        } else {
-            num("{s}   /   {s}", .{ s.chart_names[vessel.chart], if (vessel.phase == .homebound) "Returning to Java" else "Under way" }, 211, 256, 18, muted);
-            if (button("Watch voyage", 822, 249, 168, 34)) {
-                u.watchExpedition(vessel.chart);
-                u.closeModal();
-                return;
-            }
+            return false;
         }
 
-        const rows_per_page = 4;
-        const last_page = (s.ocean.routes.len - 1) / rows_per_page;
-        const wheel = if (over(211, 287, 779, 276)) r.getMouseWheelMove() else 0;
-        if (wheel > 0) u.shipyard_page -|= 1;
-        if (wheel < 0) u.shipyard_page = @min(last_page, u.shipyard_page + 1);
-        if (u.shipyard_page > 0 and button("Previous", 732, 570, 92, 29)) u.shipyard_page -= 1;
-        if (u.shipyard_page < last_page and button("Next", 917, 570, 73, 29)) u.shipyard_page += 1;
-        num("{d} / {d}", .{ u.shipyard_page + 1, last_page + 1 }, 850, 576, 16, ink);
-        const first = u.shipyard_page * rows_per_page;
-        const first_destinations = [_]usize{ 0, 2, 3, 1 };
-        for (first..@min(first + rows_per_page, s.ocean.routes.len), 0..) |entry, row| {
-            const index = if (entry < first_destinations.len) first_destinations[entry] else entry;
-            const route = s.ocean.routes[index];
-            const y = 287 + a.f(row) * 69;
-            a.rect(211, y, 779, 1, 0xcac9b4);
-            label(route.name(), 211, y + 9, 23, ink, true);
-            if (u.g.fleet.charted[index]) {
-                num("{d} residents   /   {d} landing places   /   {d} free berths", .{
-                    u.g.residents(route.chart), u.g.freeLandingSpace(route.chart), s.dock_capacity - u.g.berthsUsed(route.chart),
-                }, 211, y + 36, 16, muted);
-                if (at_java and button("Load and board", 822, y + 15, 168, 34)) {
-                    if (u.g.berthsUsed(route.chart) >= s.dock_capacity) {
-                        u.modal_note = "The destination dock has no free berth.";
-                    } else u.openManifest(.{ .expedition = .{ .to = index } });
-                    return;
-                }
-                if (button("View island", 683, y + 15, 120, 34)) {
-                    u.view.showIsland(route.chart);
-                    u.store_chart = route.chart;
+        num("Moored at {s}   /   {d} crew aboard", .{ s.chart_names[vessel.chart], ship.crew() }, 211, 256, 18, muted);
+        if (u.g.returnExpeditionProblem(u.ship_id) == null) {
+            var title: [64]u8 = undefined;
+            const caption = std.fmt.bufPrintSentinel(&title, "Return to {s}", .{s.chart_names[vessel.origin]}, 0) catch unreachable;
+            if (button(caption, 803, 249, 187, 34) and u.launchExpeditionReturn(vessel.origin)) return true;
+        }
+        if (button("View port", 669, 249, 121, 34)) {
+            u.selectIsland(vessel.chart, true);
+            u.closeModal();
+            return true;
+        }
+        u.expeditionDestinations(vessel, offset, scale);
+        return true;
+    }
+
+    fn expeditionDestinations(u: *UI, vessel: s.Vessel, offset: a.V, scale: f32) void {
+        const map = &u.expedition_map;
+        const bounds = map.bounds;
+        label("Choose a destination", 211, 291, 20, ink, true);
+        label("Scroll to zoom   /   Drag to pan", 596, 296, 14, muted, false);
+        if (button("-", 813, 287, 32, 26)) map.zoomAt(map.center(), 1.0 / 1.4);
+        if (button("+", 851, 287, 32, 26)) map.zoomAt(map.center(), 1.4);
+        if (button("Fit map", 896, 287, 94, 26)) map.* = .init(bounds);
+        const clicked = map.input(mouse);
+        if (pressed and over(bounds.x, bounds.y, bounds.width, bounds.height)) u.modal_note = null;
+        var pins: [s.settlement_count]?chart_view.ExpeditionPin = undefined;
+        var ports: [s.settlement_count]bool = undefined;
+        var has_new_voyage = false;
+        var has_return_only = false;
+        for (&pins, &ports, 0..) |*pin, *visible, island| {
+            pin.* = chart_view.expeditionPin(&u.g, u.ship_id, island);
+            visible.* = pin.* != null;
+            has_new_voyage = has_new_voyage or pin.* == .charted or pin.* == .survey;
+            has_return_only = has_return_only or pin.* == .return_only;
+        }
+        const hovered = map.pickPorts(mouse, &ports);
+        {
+            r.beginScissorMode(@intFromFloat(offset.x + bounds.x * scale), @intFromFloat(offset.y + bounds.y * scale), @intFromFloat(@ceil(bounds.width * scale)), @intFromFloat(@ceil(bounds.height * scale)));
+            defer r.endScissorMode();
+            map.drawLand();
+            for (pins, 0..) |pin, island| {
+                const marker = pin orelse continue;
+                if (marker != .departure) chart_view.drawExpeditionPin(map.project(chart_view.portPosition(island)), marker, false);
+            }
+            chart_view.drawExpeditionPin(map.project(chart_view.portPosition(vessel.chart)), .departure, false);
+            if (hovered) |island| chart_view.drawExpeditionPin(map.project(chart_view.portPosition(island)), pins[island].?, true);
+        }
+        const legend = [_]struct { pin: chart_view.ExpeditionPin, name: [:0]const u8, x: f32 }{
+            .{ .pin = .departure, .name = "Departure", .x = 220 },
+            .{ .pin = .charted, .name = "Charted port", .x = 367 },
+            .{ .pin = .survey, .name = "Survey destination", .x = 572 },
+            .{ .pin = .return_only, .name = "Return only", .x = 782 },
+        };
+        for (legend) |item| {
+            if (item.pin == .return_only and !has_return_only) continue;
+            chart_view.drawExpeditionPin(a.v(item.x, 656), item.pin, false);
+            label(item.name, item.x + 14, 647, 16, muted, false);
+        }
+
+        if (hovered) |target| {
+            if (target != vessel.chart and u.g.islandOpen(target)) {
+                label("Right-click to view port", 819, 681, 15, muted, false);
+                if (r.isMouseButtonPressed(.right)) {
+                    u.selectIsland(target, true);
                     u.closeModal();
                     return;
                 }
-            } else {
-                if (ship.canSail(route)) {
-                    const rations = u.g.oceanRations(u.ship_id, index, 0);
-                    num("Survey provisions   {d} / {d} hold units", .{ rations.units(), ship.hold() }, 211, y + 36, 16, muted);
-                } else {
-                    num("Requires the {s}   /   {d} units of provisions", .{
-                        route.ship.name(), s.expeditionRations(route) * 4,
-                    }, 211, y + 36, 16, muted);
-                }
-                if (at_java and ship.canSail(route) and button("Survey and settle", 822, y + 15, 168, 34)) {
-                    if (u.g.surveyProblem(u.ship_id, index)) |failure| {
-                        u.playCue(.denied);
-                        u.modal_note = failure;
-                    } else u.openManifest(.{ .expedition = .{ .to = index, .survey = true } });
-                    return;
-                }
             }
+            const name = s.chart_names[target];
+            const width = r.measureTextEx(sans, name, 16, 0.45).x + 18;
+            const x = @min(mouse.x + 14, bounds.x + bounds.width - width - 5);
+            const y = @max(mouse.y - 30, bounds.y + 5);
+            a.rect(x, y, width, 24, ink);
+            label(name, x + 9, y + 4, 16, paper, false);
+            u.expeditionDestination(vessel, target, pins[target].?, clicked);
+        } else if (u.modal_note) |note| {
+            label(note, 211, 680, 17, 0x8b4235, false);
+        } else if (!has_new_voyage) {
+            label("No new voyages available. Check local supplies, range, and destination berths.", 211, 680, 17, muted, false);
         }
+    }
+
+    fn expeditionDestination(u: *UI, vessel: s.Vessel, target: usize, pin: chart_view.ExpeditionPin, clicked: bool) void {
+        if (pin == .departure) {
+            label("Departure harbor", 211, 680, 17, ink, false);
+            return;
+        }
+        if (pin == .return_only) {
+            num("{d:.0} s   /   {s}", .{ vessel.legSeconds(), if (vessel.provisions >= vessel.returnProvisions()) "Return on reserved provisions" else "Return crossing" }, 211, 680, 17, ink);
+            if (clicked) u.modal = .expedition_return;
+            return;
+        }
+        const index = s.ocean.destinationIndex(target);
+        const leg = u.g.expeditionPassage(u.ship_id, index).?;
+        const survey = pin == .survey;
+        if (survey) {
+            num("{d:.0} s   /   Survey and settle", .{leg.leg_seconds}, 211, 680, 17, ink);
+        } else {
+            num("{d:.0} s   /   {d} free berths   /   {d} landing places", .{ leg.leg_seconds, u.g.freeBerths(target), u.g.freeLandingSpace(target) }, 211, 680, 17, ink);
+        }
+        if (clicked) u.openManifest(.{ .expedition = .{ .to = index, .survey = survey } });
     }
 
     fn select(u: *UI, tool: s.Kind) void {
@@ -777,8 +926,13 @@ const UI = struct {
             .lodge => "Place a hunting lodge where deer graze to bring in venison.",
             .grove => "Choose a pine forest tile for the woodlot.",
             .cottage => "Choose a land tile to house four settlers.",
+            .apartment => "Choose a cottage to upgrade. Build a town square on its island first.",
+            .plaza => "Click the top tile of a clear 2x2 block. Town squares unlock cottage upgrades.",
             .farm => "Choose open ground for a grain farm.",
-            .light => "Bali needs 8 settlers, 24 timber and 30 coins.",
+            .light => std.fmt.comptimePrint(
+                "Build on the coast within {d} tiles of the harbor. Needs 8 settlers, 24 timber and 30 coins.",
+                .{s.lighthouse_range},
+            ),
             else => "Click a tile to inspect it.",
         };
     }
@@ -865,7 +1019,7 @@ const UI = struct {
 
     fn drawHeader(u: *UI, ledger: *const queries.Ledger) void {
         a.rect(0, 0, 1200, 84, ink);
-        compass(40, 42, 23);
+        compass(40, 42, 23, .north);
         label(game_title, 75, 17, 38, paper, true);
 
         a.rect(237, 6, 452, 72, 0x2d4b49);
@@ -942,11 +1096,15 @@ const UI = struct {
                 .delivered => {
                     u.playCue(.foghorn);
                     if (event.settlers > 0) u.store_chart = event.island;
-                    u.setMessage("{s} landed on {s}. Expedition ship #{d} is moored there.", .{
-                        if (event.settlers > 0) "Settlers" else "Supplies", s.chart_names[event.island], event.ship + 1,
-                    });
+                    if (event.settlers == 0 and event.cargo.empty()) {
+                        u.setMessage("Expedition ship #{d} moored at {s}.", .{ event.ship + 1, s.chart_names[event.island] });
+                    } else {
+                        u.setMessage("{s} landed on {s}. Expedition ship #{d} is moored there.", .{
+                            if (event.settlers > 0) "Settlers" else "Supplies", s.chart_names[event.island], event.ship + 1,
+                        });
+                    }
                 },
-                .returned => u.setMessage("Expedition ship #{d} is back at Java.", .{event.ship + 1}),
+                .returned => u.setMessage("Expedition ship #{d} is back at {s}.", .{ event.ship + 1, s.chart_names[event.island] }),
                 .none => {},
             },
             .walker => |event| {
@@ -965,7 +1123,9 @@ const UI = struct {
             .restart => return u.restartDialog(),
             .bridge => return u.bridgeDialog(),
             .manifest => return u.manifestDialog(),
-            .shipyard => return u.shipyardDialog(),
+            .expedition_return => return u.expeditionReturnDialog(),
+            .shipyard => return u.shipyardDialog(offset, scale),
+            .town_name => return u.townNameDialog(),
             .none => {},
         }
         const game_seconds = dt * a.f(u.speed);
@@ -1041,8 +1201,16 @@ const UI = struct {
         }
         const bridges_button = u.showBridgesButton();
         const region_button_x: f32 = if (bridges_button) 158 else 23;
+        const left_turn_x = region_button_x + 139;
+        const right_turn_x = left_turn_x + 118;
+        const over_left_turn = over(left_turn_x, 101, 110, 32);
+        const over_right_turn = over(right_turn_x, 101, 116, 32);
+        if (!menu_handled) {
+            if (r.isKeyPressed(.q) or (pressed and over_left_turn)) u.view.rotate(false);
+            if (r.isKeyPressed(.e) or (pressed and over_right_turn)) u.view.rotate(true);
+        }
         const inside = !menu_handled and !over_inset and over(0, 84, 895, 492) and !over(region_button_x, 101, 127, 32) and
-            !(bridges_button and over(23, 101, 123, 32));
+            !over_left_turn and !over_right_turn and !(bridges_button and over(23, 101, 123, 32));
         const click = !menu_handled and u.view.input(mouse, inside, dt);
         const choosing_region = u.view.zoom < chart_view.settlement_detail_zoom;
         const regional_hit = if (inside and choosing_region) chart_view.pickIsland(u.view.world(mouse), u.view.zoom, &u.g) else null;
@@ -1050,14 +1218,26 @@ const UI = struct {
             if (regional_hit) |chart| u.selectIsland(chart, true);
         }
         const regional = u.view.zoom <= chart_view.regional_zoom;
-        const hover = if (inside and !choosing_region) u.view.pick(mouse, &u.g) else null;
+        const picked = if (inside and !choosing_region) u.view.pick(mouse, &u.g) else null;
+        const hover = u.view.placementHit(picked, u.tool);
+        if (click and picked != null and hover == null) {
+            u.playCue(.denied);
+            u.msg = "Town squares need a clear 2x2 block of land.";
+        }
         if (hover) |hit| if (click) {
             const p = hit.cell;
             const chart = hit.chart;
             if (u.tool != .empty) {
+                const charter_complete = u.tool == .light and u.g.charterComplete();
                 const failure = u.dispatch(.{ .build = .{ .island = chart, .cell = p, .kind = u.tool } }).problem();
                 u.playCue(if (failure != null) .denied else if (u.tool == .light) .beacon else .build);
-                u.msg = failure orelse if (u.tool == .light) if (u.g.charterComplete()) "The beacon is lit. Ship construction is unlocked." else "The beacon is lit on Bali." else "Construction complete.";
+                u.msg = failure orelse switch (u.tool) {
+                    .light => if (!charter_complete and u.g.charterComplete()) "Second berth open. Ship construction is unlocked." else "Lighthouse built. This harbor now has two berths.",
+                    .apartment => "Cottage upgraded to apartments.",
+                    .plaza => "Town square built. You can now upgrade cottages on this island.",
+                    else => "Construction complete.",
+                };
+                if (failure == null and u.tool == .plaza and u.g.countOn(chart, .plaza) == 1) u.openTownName(chart);
                 if (failure == null and u.tool == .well and u.g.countOn(chart, .well) > s.waterCapacity(chart) / s.well_yield) {
                     u.msg = "Well built. The island already has enough wells to reach its daily water limit.";
                 }
@@ -1076,6 +1256,14 @@ const UI = struct {
                     } else {
                         u.setMessage("{s} has {d}/{d} {s} available to harvest.", .{ name, harvest.stock, s.harvest_capacity, resource });
                     }
+                } else if (k == .cottage) {
+                    u.setMessage("Cottage houses {d}. Select Apartments to upgrade it after building a town square.", .{s.beds(k)});
+                } else if (k == .apartment) {
+                    u.setMessage("Apartments house {d} settlers.", .{s.beds(k)});
+                } else if (k == .light) {
+                    u.msg = "Lighthouse. This harbor has two berths.";
+                } else if (s.isPlaza(k)) {
+                    u.openTownName(chart);
                 } else u.msg = if (k != .empty) s.names[@backingInt(k)] else switch (s.site(p, chart)) {
                     .outcrop => "Rocky outcrop - suitable for a quarry.",
                     .deer => "Deer herd - suitable for a hunting lodge.",
@@ -1094,7 +1282,7 @@ const UI = struct {
             if (goal == .bridge) preview_bridge = over(1100, 226 + a.f(i) * 32, 78, 27);
         }
         r.beginScissorMode(@intFromFloat(offset.x), @intFromFloat(offset.y + 84 * scale), @intFromFloat(@ceil(895 * scale)), @intFromFloat(@ceil(492 * scale)));
-        u.view.draw(&u.g, hover, u.elapsed, u.tool, preview_bridge);
+        u.view.draw(&u.g, picked, u.elapsed, u.tool, preview_bridge);
         for (region.islands) |isle| {
             if (isle.label_size == .minor and u.view.zoom < 0.44) continue;
             const at = u.view.project(a.chartPoint(isle.label));
@@ -1132,8 +1320,11 @@ const UI = struct {
         if (button(if (regional) "Local map" else "Regional map", region_button_x, 101, 127, 32)) {
             if (regional) u.view = .{} else u.view.showRegion();
         }
-        compass(842, 146, 23);
-        label("N", 837, 106, 14, paper, false);
+        _ = button("Q  Turn left", left_turn_x, 101, 110, 32);
+        _ = button("E  Turn right", right_turn_x, 101, 116, 32);
+        compass(842, 146, 23, u.view.angle);
+        const north = r.math.vector2Normalize(u.view.angle.apply(a.v(0, -1)));
+        label("N", 837 + 36 * north.x, 140 + 36 * north.y, 14, paper, false);
         a.rect(0, 576, 897, 42, 0x40787a);
         label(u.msg, 26, 588, 17, 0xfff3d9, false);
         a.rect(895, 84, 305, 534, paper);
@@ -1141,6 +1332,7 @@ const UI = struct {
         if (button("Shipyard", 1080, 101, 98, 30)) {
             u.modal = .shipyard;
             u.modal_note = null;
+            u.ferry_page = 0;
         }
         label(if (goals[0] == null) "Charter complete" else "The island charter", 915, 131, 31, ink, true);
         if (goals[0] != null) label(if (u.g.charterComplete()) "Explore and settle farther shores." else "Settle and link the islands.", 916, 180, 17, ink, false);
@@ -1159,8 +1351,14 @@ const UI = struct {
             if (goal == .bridge and button("Plan", 1100, y - 5, 78, 27)) u.openBridges(s.strait);
         }
         a.rect(916, 338, 261, 1, 0xc5c6ae);
-        label(s.chart_names[u.store_chart], 915, 353, 27, ink, true);
-        if (u.g.islandOpen(u.store_chart) and button("View port", 1091, 349, 87, 35)) u.view.showIsland(u.store_chart);
+        const town = u.g.townName(u.store_chart);
+        if (town) |name| {
+            _ = u.town_renderer.draw(sans, name, a.v(915, 344), 27, 262, a.c(ink), 0);
+            label(s.chart_names[u.store_chart], 916, 376, 14, muted, false);
+        } else {
+            label(s.chart_names[u.store_chart], 915, 353, 27, ink, true);
+        }
+        if (u.g.islandOpen(u.store_chart) and button("View port", 1091, if (town != null) 367 else 349, 87, if (town != null) 22 else 35)) u.view.showIsland(u.store_chart);
         var export_text: [64]u8 = undefined;
         const export_caption = std.fmt.bufPrintSentinel(&export_text, "Export {s} grain", .{s.chart_names[u.store_chart]}, 0) catch unreachable;
         if (button(export_caption, 916, 393, 262, 35)) {
@@ -1175,30 +1373,42 @@ const UI = struct {
         else
             std.fmt.bufPrintSentinel(&ferry_text, "Ferry {s} {s}", .{ if (u.g.ferry.surveying) "surveying" else "under sail to", s.chart_names[u.g.ferry.destination] }, 0) catch unreachable;
         label(ferry_status, 916, 451, 16, muted, false);
-        num("Dock berths   {d} / {d} occupied or reserved", .{ ledger.berths_used, s.dock_capacity }, 916, 476, 16, muted);
+        num("Dock berths   {d} / {d} occupied or reserved", .{ ledger.berths_used, ledger.berth_capacity }, 916, 476, 16, muted);
         const camp = u.store_chart != 0 and u.g.islandOpen(u.store_chart) and ledger.housing == 0;
         num("{s}   {d} / {d}", .{ if (camp) "Camp" else "Housing", ledger.residents, ledger.landing_capacity }, 916, 535, 17, ink);
         num("Food  +{d} grain   +{d} meat   +{d} fruit", .{ supply.grain, supply.venison, supply.fruit }, 916, 578, 15, muted);
         num("Water +{d}/{d} max   /   {d} of each used", .{ supply.water, ledger.water_limit, demand }, 916, 598, 15, muted);
         a.rect(0, 618, 1200, 142, 0xe5dfce);
         label("Construction", 23, 632, 26, ink, true);
-        label("1-8   Select     Right-click   Deselect", 226, 639, 15, muted, false);
+        label("1-9, 0   Select     Right-click   Deselect", 226, 639, 15, muted, false);
         label("Scroll   Zoom     Drag   Pan     Home   Fit", 524, 639, 15, muted, false);
         label("Space   Pause      F5   Save      F9   Load", 802, 640, 15, muted, false);
         if (button("Restart", 1076, 629, 102, 35)) u.modal = .restart;
         for (opts, 0..) |k, i| {
-            const x = 23 + a.f(i) * 145;
-            const hot = over(x, 677, 137, 69);
+            const x = 23 + a.f(i) * 116;
+            const hot = over(x, 677, 110, 69);
             const active = u.tool == k;
-            a.rect(x, 677, 137, 68, if (active) ink else if (hot) 0xfff7e1 else paper);
-            a.building(k, x + 22, 721, 0.64);
-            label(s.names[@backingInt(k)], x + 42, 684, 18, if (active) paper else ink, true);
-            if (k == .well) {
-                num("{d} wood, {d} stone", .{ s.costs[@backingInt(k)], s.well_stone }, x + 42, 705, 13, if (active) gold else muted);
+            const name_color: u32 = if (active) paper else ink;
+            const cost_color: u32 = if (active) gold else muted;
+            const desc_color: u32 = if (active) paper else muted;
+            a.rect(x, 677, 110, 68, if (active) ink else if (hot) 0xfff7e1 else paper);
+            label(s.names[@backingInt(k)], x + 7, 683, 15, name_color, true);
+            a.building(k, x + 18, 723, 0.46);
+            const beds = s.beds(k);
+            if (beds > 0) {
+                num("Houses {d}", .{beds}, x + 34, 706, 11.5, desc_color);
             } else {
-                num("{d} {s}", .{ s.costs[@backingInt(k)], if (k == .road) "stone" else "timber" }, x + 42, 705, 14, if (active) gold else muted);
+                label(desc[i], x + 34, 706, 11.5, desc_color, false);
             }
-            label(desc[i], x + 42, 723, 14, if (active) paper else muted, false);
+            const timber = s.costs[@backingInt(k)];
+            const stone = s.stoneCost(k);
+            if (k == .road) {
+                num("{d} stone", .{stone}, x + 7, 729, 12, cost_color);
+            } else if (stone != 0) {
+                num("{d} timber, {d} stone", .{ timber, stone }, x + 7, 729, 11, cost_color);
+            } else {
+                num("{d} timber", .{timber}, x + 7, 729, 12, cost_color);
+            }
             if (hot and pressed) u.select(if (active) .empty else k);
         }
         if (u.island_menu_open) u.drawIslandMenu(options);
@@ -1252,7 +1462,12 @@ fn run(process: std.process.Init, store: save_store.Store, trace: ?*diagnostics.
     defer r.closeWindow();
     r.setTargetFPS(60);
     r.setExitKey(.null);
-    sans = try r.loadFontFromMemory(".ttf", @embedFile("fonts/AtkinsonHyperlegible-Regular.ttf"), 48, null);
+    const text_points = comptime points: {
+        var codepoints: [0x180 - 0x20]i32 = undefined;
+        for (&codepoints, 0x20..) |*point, i| point.* = @intCast(i);
+        break :points codepoints;
+    };
+    sans = try r.loadFontFromMemory(".ttf", @embedFile("fonts/AtkinsonHyperlegible-Regular.ttf"), 48, &text_points);
     defer r.unloadFont(sans);
     serif = try r.loadFontFromMemory(".ttf", @embedFile("fonts/DMSerifDisplay-Regular.ttf"), 64, null);
     defer r.unloadFont(serif);
@@ -1263,6 +1478,7 @@ fn run(process: std.process.Init, store: save_store.Store, trace: ?*diagnostics.
     u.stock_alerts = .init(&u.g);
     u.view.showIsland(0);
     defer u.effects.deinit();
+    defer u.town_renderer.deinit();
     if (trace) |active| {
         var available: usize = 0;
         for (u.effects.sounds) |sound| available += @intFromBool(sound != null);

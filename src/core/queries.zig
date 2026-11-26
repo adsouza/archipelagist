@@ -7,6 +7,7 @@ pub const Ledger = struct {
     housing: u16,
     landing_capacity: u16,
     berths_used: usize,
+    berth_capacity: usize,
     /// The stockpile this island draws on, shared with any islands joined to it.
     stock: domain.Stores,
     /// Another island sharing that stockpile, if any.
@@ -35,6 +36,7 @@ pub fn ledger(game: *const domain.Game, chart: usize) Ledger {
         .housing = game.housing(chart),
         .landing_capacity = game.landingCapacity(chart),
         .berths_used = game.berthsUsed(chart),
+        .berth_capacity = game.berthCapacity(chart),
         .stock = game.stockOf(chart),
         .shared_with = sharedWith(game, chart),
         .production = game.production(chart),

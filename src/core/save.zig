@@ -1,11 +1,21 @@
-// Save codec. A save is "ARC1" followed by every field of `Game` in
+// Save codec. A save is "ARC4" followed by every field of `Game` in
 // declaration order, little-endian, except the clock, which the session
 // stores. Decoding checks every invariant the rules rely on, so a corrupt
 // or hand-edited save is rejected rather than loaded.
 const s = @import("colony.zig");
 const std = @import("std");
 
-const magic = "ARC1";
+const Version = enum(u8) { unnamed, named, voyage_origin, voyage_provisions };
+const magic = "ARC4";
+const origin_magic = "ARC3";
+const named_magic = "ARC2";
+const legacy_magic = "ARC1";
+
+fn includesField(comptime T: type, comptime name: []const u8, version: Version) bool {
+    if (comptime T == s.Game and std.mem.eql(u8, name, "town_names")) return version != .unnamed;
+    if (comptime T == s.Vessel and std.mem.eql(u8, name, "origin")) return version == .voyage_origin or version == .voyage_provisions;
+    return true;
+}
 
 fn encodedSize(comptime T: type) usize {
     if (T == s.Tile) return 1;
@@ -28,6 +38,8 @@ fn encodedSize(comptime T: type) usize {
 }
 
 const size = magic.len + encodedSize(s.Game);
+const named_size = size - s.max_expedition_ships * encodedSize(u8);
+const legacy_size = named_size - encodedSize([s.settlement_count]s.TownName);
 
 /// Where a field of `Game` starts in an encoded game.
 fn offsetOf(comptime field: []const u8) usize {
@@ -46,6 +58,7 @@ fn Stored(comptime T: type) type {
 const Writer = struct {
     bytes: []u8,
     at: usize = 0,
+    version: Version = .voyage_provisions,
 
     fn put(w: *Writer, comptime T: type, value: T) void {
         if (T == s.Tile) {
@@ -65,7 +78,9 @@ const Writer = struct {
             .array => for (value) |item| w.put(@TypeOf(item), item),
             .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
                 if (T == s.Game and comptime std.mem.eql(u8, name, "day_time")) continue;
-                w.put(Field, @field(value, name));
+                if (comptime T == s.Vessel and std.mem.eql(u8, name, "provisions")) {
+                    w.put(u8, if (w.version == .voyage_provisions) value.provisions else @intFromBool(value.provisions != 0));
+                } else if (includesField(T, name, w.version)) w.put(Field, @field(value, name));
             },
             else => comptime unreachable,
         }
@@ -75,6 +90,7 @@ const Writer = struct {
 const Reader = struct {
     bytes: []const u8,
     at: usize = 0,
+    version: Version,
 
     fn take(r: *Reader, comptime T: type) ?T {
         if (T == s.Tile) {
@@ -106,7 +122,21 @@ const Reader = struct {
                 var value: T = .{};
                 inline for (info.field_names, info.field_types) |name, Field| {
                     if (T == s.Game and comptime std.mem.eql(u8, name, "day_time")) continue;
-                    @field(value, name) = r.take(Field) orelse return null;
+                    if (includesField(T, name, r.version)) @field(value, name) = r.take(Field) orelse return null;
+                }
+                if (comptime T == s.Vessel) {
+                    if (r.version != .voyage_provisions) {
+                        // Before ARC4 this byte recorded whether the return leg was paid for.
+                        switch (value.provisions) {
+                            0 => if (value.phase == .outbound) return null,
+                            1 => {
+                                if (value.phase == .homebound) return null;
+                                value.provisions = @intCast(value.returnProvisions());
+                                if (value.provisions == 0) return null;
+                            },
+                            else => return null,
+                        }
+                    }
                 }
                 return value;
             },
@@ -125,19 +155,41 @@ pub fn encode(g: s.Game) [size]u8 {
 }
 
 pub fn decode(bytes: []const u8) ?s.Game {
-    if (bytes.len != size or !std.mem.eql(u8, bytes[0..magic.len], magic)) return null;
-    var reader = Reader{ .bytes = bytes, .at = magic.len };
+    const version: Version = switch (bytes.len) {
+        size => if (std.mem.eql(u8, bytes[0..4], magic))
+            .voyage_provisions
+        else if (std.mem.eql(u8, bytes[0..4], origin_magic))
+            .voyage_origin
+        else
+            return null,
+        named_size => if (std.mem.eql(u8, bytes[0..4], named_magic)) .named else return null,
+        legacy_size => if (std.mem.eql(u8, bytes[0..4], legacy_magic)) .unnamed else return null,
+        else => return null,
+    };
+    var reader = Reader{ .bytes = bytes, .at = magic.len, .version = version };
     const g = reader.take(s.Game) orelse return null;
     return if (valid(&g)) g else null;
 }
 
 /// The invariants the rules rely on.
 fn valid(g: *const s.Game) bool {
-    if (g.day == 0) return false;
-    for (s.geography.grids, 0..) |grid, chart| {
+    if (g.day == 0 or g.fleet.count > g.fleet.vessels.len) return false;
+    for (s.geography.grids, &g.town_names, 0..) |grid, *name, chart| {
+        if (!name.valid() or (name.len != 0 and g.countOn(chart, .plaza) == 0)) return false;
         for (g.tilesOn(chart), 0..) |tile, index| {
             if (!s.validHarvestState(tile.kind, tile.harvest_state)) return false;
-            if (tile.kind != .empty and s.depth(grid.cell(index), chart) < 0) return false;
+            const cell = grid.cell(index);
+            if (tile.kind != .empty and s.depth(cell, chart) < 0) return false;
+            switch (tile.kind) {
+                .plaza => {
+                    const footprint = s.plazaCells(cell);
+                    for (footprint[1..]) |paving| {
+                        if (!grid.contains(paving) or g.tileAt(chart, paving) != .plaza_paving) return false;
+                    }
+                },
+                .plaza_paving => if (g.plazaAnchor(chart, cell) == null) return false,
+                else => {},
+            }
         }
     }
     for (g.diets) |diet| {
@@ -165,10 +217,6 @@ fn valid(g: *const s.Game) bool {
     }
     if (!validWalkers(g)) return false;
     if (!validFerry(g)) return false;
-    if (g.fleet.count > g.fleet.vessels.len) return false;
-    for (g.vessels()) |vessel| {
-        if (vessel.ship == .none) return false;
-    }
     return validFleet(g);
 }
 
@@ -213,48 +261,44 @@ fn validFerry(g: *const s.Game) bool {
 fn validFleet(g: *const s.Game) bool {
     if (g.awayFromJava() > g.people) return false;
     if (g.fleet.count > 0 and !g.charterComplete()) return false;
-    var barque = false;
     var surveying: [s.settlement_count]bool = @splat(false);
     if (g.ferry.surveying) surveying[g.ferry.destination] = true;
     var arriving: [s.settlement_count]s.Stores = @splat(.{});
-    if (g.voyageDestination()) |chart| arriving[chart] = g.ferry.cargo;
+    if (g.voyageDestination()) |chart| arriving[g.depot(chart)] = g.ferry.cargo;
     for (g.vessels()) |vessel| {
-        barque = barque or vessel.ship == .barque;
+        if (vessel.ship == .none or vessel.chart >= s.settlement_count or !g.islandOpen(vessel.origin)) return false;
         if (vessel.ship == .barque and !g.fleet.charted[0]) return false;
-        const route = s.ocean.routeTo(vessel.chart);
-        if (route) |index| {
-            if (!vessel.ship.canSail(s.ocean.routes[index])) return false;
-        }
         if (!std.math.isFinite(vessel.elapsed) or vessel.elapsed < 0) return false;
         if (vessel.phase != .outbound and (vessel.carryingLoad() or vessel.surveying)) return false;
-        if (vessel.phase == .docked) {
-            if (!g.islandOpen(vessel.chart) or vessel.elapsed != 0 or (vessel.chart <= 1 and vessel.return_provisioned)) return false;
-        } else {
-            if (vessel.chart == 0 or vessel.elapsed >= vessel.legSeconds()) return false;
-            if (vessel.phase == .homebound) {
-                if (!g.islandOpen(vessel.chart) or vessel.return_provisioned) return false;
-            } else {
-                if (route == null or !vessel.return_provisioned or vessel.passengers > vessel.ship.passengerCapacity()) return false;
+        if (vessel.phase != .docked) {
+            const passage = s.ocean.passage(vessel.origin, vessel.chart) orelse return false;
+            if (!vessel.ship.canSail(passage) or vessel.elapsed >= passage.leg_seconds) return false;
+        }
+        const used = @as(u32, vessel.provisions) * 4 + vessel.cargo.units();
+        if (used > vessel.ship.hold()) return false;
+        switch (vessel.phase) {
+            .docked => if (!g.islandOpen(vessel.chart) or vessel.elapsed != 0) return false,
+            .homebound => if (!g.islandOpen(vessel.chart) or used + @as(u32, vessel.returnProvisions()) * 4 > vessel.ship.hold()) return false,
+            .outbound => {
+                if (vessel.passengers > vessel.ship.passengerCapacity()) return false;
+                if (used + @as(u32, vessel.outwardProvisions()) * 4 > vessel.ship.hold()) return false;
                 if (vessel.surveying == g.islandOpen(vessel.chart)) return false;
-                if (!vessel.surveying and !vessel.carryingLoad()) return false;
                 if (vessel.surveying) {
                     if (surveying[vessel.chart]) return false;
                     surveying[vessel.chart] = true;
                 }
-                const sum = &arriving[vessel.chart];
+                const sum = &arriving[g.depot(vessel.chart)];
                 inline for (s.store_fields) |name| {
                     if (@field(vessel.cargo, name) > std.math.maxInt(u16) - @field(sum, name)) return false;
                 }
                 sum.add(vessel.cargo);
-            }
+            },
         }
     }
-    for (s.ocean.routes, g.fleet.charted) |route, charted| {
-        // The ferry can chart nearby harbors, so only barque routes need a ship.
-        if (charted and !barque and route.ship == .barque) return false;
-    }
     for (0..s.settlement_count) |chart| {
-        if (g.berthsUsed(chart) > s.dock_capacity) return false;
+        // Older saves could book both berths before this island had a lighthouse.
+        // Honor those bookings, including incoming ships, up to the original limit.
+        if (g.berthsUsed(chart) > s.max_dock_capacity) return false;
         if (@as(u32, g.residents(chart)) + g.reservedBeds(chart) > g.landingCapacity(chart)) return false;
         inline for (s.store_fields) |name| {
             if (@field(arriving[chart], name) > std.math.maxInt(u16) - @field(g.stockOf(chart), name)) return false;
@@ -280,7 +324,8 @@ pub const Session = struct {
     }
 
     pub fn decodeSession(bytes: []const u8) ?Session {
-        if (bytes.len != @sizeOf(SessionBytes) or !std.mem.eql(u8, bytes[0..4], "SES1")) return null;
+        if (bytes.len != @sizeOf(SessionBytes) and bytes.len != 4 + named_size + 5 and bytes.len != 4 + legacy_size + 5) return null;
+        if (!std.mem.eql(u8, bytes[0..4], "SES1")) return null;
         const trailer = bytes.len - 5;
         const day_time: f32 = @bitCast(std.mem.readInt(u32, bytes[trailer..][0..4], .little));
         const speed = bytes[bytes.len - 1];
@@ -303,6 +348,29 @@ fn returnExpeditionToJava(g: *s.Game) !void {
     const seconds = g.fleet.vessels[0].legSeconds();
     try std.testing.expect(g.returnExpedition(0) == null);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.returned, g.advanceExpedition(0, seconds));
+}
+
+test "a legacy save keeps its town square and can name the town after loading" {
+    var session = Session{ .speed = 3 };
+    session.game.store(0).stone = 16;
+    try std.testing.expect(session.game.build(0, .{ .x = 45, .y = 42 }, .plaza) == null);
+    session.game.day_time = 2.25;
+    const current = session.encodeSession();
+    var legacy: [4 + legacy_size + 5]u8 = undefined;
+    legacy[0..4].* = "SES1".*;
+    legacy[4..8].* = legacy_magic.*;
+    var writer = Writer{ .bytes = legacy[0 .. 4 + legacy_size], .at = 8, .version = .unnamed };
+    writer.put(s.Game, session.game);
+    try std.testing.expectEqual(4 + legacy_size, writer.at);
+    legacy[4 + legacy_size ..][0..5].* = current[current.len - 5 ..][0..5].*;
+
+    var restored = Session.decodeSession(&legacy).?;
+    try std.testing.expectEqualDeep(session, restored);
+    try std.testing.expect(restored.game.townName(0) == null);
+    const name = s.TownName.parse("Tanjung Élan").?;
+    try std.testing.expect(restored.game.renameTown(0, name) == null);
+    const named = Session.decodeSession(&restored.encodeSession()).?;
+    try std.testing.expectEqualStrings(name.text(), named.game.townName(0).?);
 }
 
 test "save round trip and corrupt tile rejection" {
@@ -585,6 +653,8 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
     g.people = 6;
     g.coins = 150;
     try surveyFerryAndReturn(&g);
+    // Java's inland lighthouse predates the coastal placement rule.
+    g.setTile(0, .{ .x = 40, .y = 39 }, .light);
     g.charter.won = true;
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
@@ -593,6 +663,7 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
 
     const before_exploration = encode(g);
     g = decode(&before_exploration).?;
+    try std.testing.expectEqual(@as(usize, 2), g.berthCapacity(0));
     try std.testing.expectEqualDeep([3]?s.Goal{ .build_brig, .chart_lombok, .build_barque }, g.nextGoals());
     try std.testing.expect(g.buildShip(0, .barque) != null);
     const brig = s.shipCost(.brig);
@@ -610,7 +681,8 @@ test "shipyard provisions both voyages and saves expeditions in progress" {
     try std.testing.expectEqual(@as(f32, 3), g.fleet.vessels[0].elapsed);
     try std.testing.expect(!g.fleet.charted[0]);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, outward.leg_seconds - 3));
-    try std.testing.expect(g.launchExpedition(0, 1, 0, .{}) != null);
+    try std.testing.expect(g.surveyProblem(0, 1) == null);
+    try std.testing.expect(g.oceanProvisioning(0, 1, 0).one_way);
     try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(0, 100));
     try std.testing.expectEqual(@as(?usize, 0), s.ocean.routeTo(g.fleet.vessels[0].chart));
     try std.testing.expectEqual(@as(f32, 1), g.fleet.vessels[0].progress());
@@ -642,6 +714,7 @@ test "a survey ship lands settlers and supplies on the island it charts" {
     g.people = 6;
     g.coins = 120;
     try surveyFerryAndReturn(&g);
+    g.setTile(0, .{ .x = 55, .y = 44 }, .light);
     g.charter = .{ .ferried_to_bali = true, .won = true, .housed_eight = true };
     g.bridges[0] = true;
     g.store(0).* = .{ .timber = 100, .stone = 60, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
@@ -685,6 +758,7 @@ test "Lombok keeps settlers and cargo after a saved passage" {
     g.people = 4;
     g.coins = 120;
     try surveyFerryAndReturn(&g);
+    g.setTile(0, .{ .x = 55, .y = 44 }, .light);
     g.charter.won = true;
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
@@ -738,6 +812,7 @@ test "Borneo and Sumatra can be surveyed, settled, and restored at sea and on sh
     g.people = 8;
     g.coins = 180;
     try surveyFerryAndReturn(&g);
+    g.setTile(0, .{ .x = 55, .y = 44 }, .light);
     g.charter.won = true;
     g.bridges[0] = true;
     g.charter.ferried_to_bali = true;
@@ -822,6 +897,7 @@ test "every expedition destination supports a survey and a saved settlement voya
         g.bridges[0] = true;
         g.charter.ferried_to_bali = true;
         g.openPort(1);
+        g.setTile(0, .{ .x = 55, .y = 44 }, .light);
         g.fleet.vessels[0].ship = route.ship;
         g.fleet.count = 1;
         if (route.ship == .barque) {
@@ -889,10 +965,15 @@ test "shipyards charge local stores and reserve berths for incoming ships across
     g.store(0).* = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     g.store(1).* = g.store(0).*;
 
-    const java_stores = g.store(0).*;
+    const java_stores = g.stockOf(0);
+    try std.testing.expectEqual(@as(usize, 1), g.berthCapacity(1));
+    try std.testing.expectEqualStrings("The local dock has no free berth.", g.buildShip(1, .brig).?);
+    try std.testing.expect(g.build(1, .{ .x = 40, .y = 26 }, .light) == null);
+    try std.testing.expectEqual(@as(usize, 2), g.berthCapacity(1));
+    try std.testing.expectEqual(@as(usize, 1), g.berthCapacity(0));
     try std.testing.expect(g.buildShip(1, .brig) == null);
-    try std.testing.expectEqualDeep(java_stores, g.store(0).*);
-    try std.testing.expectEqual(@as(u16, 168), g.store(1).timber);
+    try std.testing.expectEqualDeep(java_stores, g.stockOf(0));
+    try std.testing.expectEqual(@as(u16, 144), g.stockOf(1).timber);
     try std.testing.expectEqual(@as(usize, 2), g.berthsUsed(1));
     const bali_full = encode(g);
     try std.testing.expect(g.buildShip(1, .brig) != null);
@@ -901,6 +982,9 @@ test "shipyards charge local stores and reserve berths for incoming ships across
     try std.testing.expect(g.returnExpedition(0) == null);
     try std.testing.expectEqual(@as(usize, 1), g.berthsUsed(0));
     try std.testing.expectEqual(@as(usize, 1), g.berthsUsed(1));
+    try std.testing.expectEqualStrings("The local dock has no free berth.", g.buildShip(0, .brig).?);
+    try std.testing.expectEqualStrings("The destination dock has no free berth.", g.sailFerry(0).?);
+    try std.testing.expect(g.build(0, .{ .x = 55, .y = 44 }, .light) == null);
     try std.testing.expect(g.buildShip(0, .brig) == null);
     try std.testing.expect(g.sailFerry(0) != null);
     try std.testing.expect(g.buildShip(0, .brig) != null);
@@ -925,6 +1009,195 @@ test "shipyards charge local stores and reserve berths for incoming ships across
     try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
 }
 
+test "legacy berth reservations survive reload before a lighthouse is built" {
+    var g = s.Game.init();
+    g.chartHarbor(1);
+    g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    g.bridges[0] = true;
+    // A ferry in Java and a returning brig were allowed to share Java's dock.
+    g.fleet.count = 1;
+    g.fleet.vessels[0] = .{ .ship = .brig, .chart = 1, .phase = .homebound };
+
+    var named: [named_size]u8 = undefined;
+    named[0..4].* = named_magic.*;
+    var writer = Writer{ .bytes = &named, .at = 4, .version = .named };
+    writer.put(s.Game, g);
+    try std.testing.expectEqual(named_size, writer.at);
+    g = decode(&named).?;
+    try std.testing.expectEqual(@as(usize, 1), g.berthCapacity(0));
+    try std.testing.expectEqual(@as(usize, 2), g.berthsUsed(0));
+    try std.testing.expectEqual(@as(usize, 0), g.freeBerths(0));
+    try std.testing.expectEqualStrings("The local dock has no free berth.", g.buildShip(0, .brig).?);
+    try std.testing.expectEqual(s.Game.ExpeditionEvent.returned, g.advanceExpedition(0, s.crossing_seconds));
+    try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
+    try std.testing.expect(g.sailFerry(1) == null);
+    try std.testing.expectEqual(@as(usize, 1), g.berthsUsed(0));
+    g.advanceShip(s.crossing_seconds);
+    try std.testing.expectEqualStrings("The destination dock has no free berth.", g.sailFerry(0).?);
+}
+
+test "Bali brigs survey Siberut and Buton directly and return using Bali provisions" {
+    for ([_]usize{ 25, 27 }, [_][]const u8{ "Siberut", "Buton" }) |target, name| {
+        try std.testing.expectEqualStrings(name, s.chart_names[target]);
+        var g = s.Game.init();
+        g.chartHarbor(1);
+        g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+        g.bridges[0] = true;
+        g.people = 8;
+        g.island_people[0] = 4;
+        g.coins = 100;
+        g.store(1).* = .{ .timber = 50, .stone = 10, .grain = 50, .venison = 50, .fruit = 50, .water = 50 };
+        try std.testing.expect(g.buildShip(1, .brig) == null);
+
+        const index = s.ocean.destinationIndex(target);
+        const leg = g.expeditionPassage(0, index).?;
+        try std.testing.expect(s.ocean.Ship.brig.canSail(leg));
+        const course = s.ocean.directCourse(1, target).?;
+        const start = s.ferry.berth(1);
+        const end = s.ferry.berth(target);
+        try std.testing.expect(s.ferry.courseClear(1, target, s.ferry.detourCourse, .{ start, course.waypoints, end }));
+        const java = g.stockOf(0);
+        const bali = g.stockOf(1);
+        const load: s.Stores = .{ .stone = 1, .grain = 2 };
+        const rations = g.oceanRations(0, index, 1);
+        g.store(1).water = 0;
+        try std.testing.expect(g.launchExpedition(0, index, 1, load) != null);
+        g.store(1).water = bali.water;
+
+        try std.testing.expect(g.launchExpedition(0, index, 1, load) == null);
+        var remaining = bali;
+        remaining.take(rations);
+        remaining.take(load);
+        try std.testing.expectEqualDeep(remaining, g.stockOf(1));
+        try std.testing.expectEqualDeep(java, g.stockOf(0));
+        try std.testing.expectEqual(@as(u16, 4), g.residents(0));
+        try std.testing.expectEqual(@as(u16, 3), g.residents(1));
+        try std.testing.expectEqual(@as(u16, 1), g.reservedBeds(target));
+        try std.testing.expectEqual(@as(usize, 0), g.freeBerths(target));
+        try std.testing.expectEqual(s.Game.ExpeditionEvent.none, g.advanceExpedition(0, 1));
+        g = decode(&encode(g)).?;
+        try std.testing.expectEqual(@as(u8, 1), g.fleet.vessels[0].origin);
+        try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, leg.leg_seconds - 1));
+        try std.testing.expectEqual(@as(u16, 1), g.residents(target));
+        try std.testing.expectEqualDeep(load, g.stockOf(target));
+
+        try std.testing.expect(g.returnExpedition(0) == null);
+        try std.testing.expectEqual(@as(usize, 0), g.freeBerths(1));
+        g = decode(&encode(g)).?;
+        try std.testing.expectEqual(s.Game.ExpeditionEvent.returned, g.advanceExpedition(0, leg.leg_seconds));
+        try std.testing.expectEqual(@as(usize, 1), g.fleet.vessels[0].chart);
+        try std.testing.expectEqualDeep(load, g.stockOf(target));
+        try std.testing.expectEqualDeep(g, decode(&encode(g)).?);
+    }
+}
+
+test "a brig can use its saved return provisions to sail onward from an uninhabited island" {
+    var g = s.Game.init();
+    g.chartHarbor(1);
+    g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    g.bridges[0] = true;
+    g.people = 8;
+    g.island_people[0] = 4;
+    g.coins = 100;
+    g.store(1).* = .{ .timber = 50, .stone = 10, .grain = 50, .venison = 50, .fruit = 50, .water = 50 };
+    try std.testing.expect(g.buildShip(1, .brig) == null);
+
+    const siberut = 25;
+    const sumatra = s.geography.sumatra;
+    const onward_route = s.ocean.destinationIndex(sumatra);
+    const load: s.Stores = .{ .grain = 6, .venison = 6, .fruit = 6 };
+    try std.testing.expect(g.launchExpedition(0, s.ocean.destinationIndex(siberut), 0, load) == null);
+    try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, g.fleet.vessels[0].legSeconds()));
+    const previous_reserve = g.fleet.vessels[0].provisions;
+    var old: [size]u8 = undefined;
+    old[0..4].* = origin_magic.*;
+    var writer = Writer{ .bytes = &old, .at = 4, .version = .voyage_origin };
+    writer.put(s.Game, g);
+    try std.testing.expectEqual(size, writer.at);
+    g = decode(&old).?;
+    try std.testing.expectEqual(previous_reserve, g.fleet.vessels[0].provisions);
+    try std.testing.expectEqual(@as(u16, 0), g.residents(siberut));
+    try std.testing.expectEqual(@as(u16, 0), g.surveySettlerLimit(0, onward_route));
+    const plan = g.oceanProvisioning(0, onward_route, 0);
+    try std.testing.expect(plan.outward > 0 and plan.aboard > plan.required);
+    try std.testing.expectEqual(@as(u16, 0), plan.fromPort());
+    try std.testing.expectEqual(@as(u32, previous_reserve) * 4, plan.holdUnits());
+
+    const bali = g.stockOf(1);
+    try std.testing.expect(g.launchExpedition(0, onward_route, 0, .{}) == null);
+    try std.testing.expectEqualDeep(load, g.stockOf(siberut));
+    try std.testing.expectEqualDeep(bali, g.stockOf(1));
+    g = decode(&encode(g)).?;
+    try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, g.fleet.vessels[0].legSeconds()));
+    try std.testing.expectEqual(@as(usize, sumatra), g.fleet.vessels[0].chart);
+    try std.testing.expectEqual(@as(u16, 8), g.people);
+    try std.testing.expectEqual(@as(u16, 0), g.residents(sumatra));
+    const after_outward = previous_reserve - plan.outward;
+    try std.testing.expectEqual(after_outward, g.fleet.vessels[0].provisions);
+    const return_cost = g.fleet.vessels[0].returnProvisions();
+    try std.testing.expect(g.returnExpedition(0) == null);
+    try std.testing.expectEqual(@as(usize, siberut), g.fleet.vessels[0].berthChart());
+    try std.testing.expectEqual(after_outward - return_cost, g.fleet.vessels[0].provisions);
+}
+
+test "an onward crossing tops up its reserves and can use one-way provisions" {
+    var g = s.Game.init();
+    g.chartHarbor(1);
+    g.chartHarbor(25);
+    g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    g.bridges[0] = true;
+    g.fleet.count = 1;
+    g.fleet.vessels[0] = .{ .ship = .brig, .chart = 25, .provisions = 1 };
+    const index = s.ocean.destinationIndex(s.geography.sumatra);
+    try std.testing.expectEqualStrings("Stock more local grain, venison, fruit, and water before sailing.", g.launchExpedition(0, index, 0, .{}).?);
+    try std.testing.expectEqual(@as(u8, 1), g.fleet.vessels[0].provisions);
+    g.store(25).* = .{ .grain = 1, .venison = 1, .fruit = 1, .water = 1 };
+    const plan = g.oceanProvisioning(0, index, 0);
+    try std.testing.expect(plan.one_way);
+    try std.testing.expectEqual(@as(u16, 1), plan.fromPort());
+    try std.testing.expectEqual(@as(u16, 0), g.oceanCargoLimit(0, index, 0).water);
+    try std.testing.expect(g.launchExpedition(0, index, 0, .{}) == null);
+    try std.testing.expect(g.stockOf(25).empty());
+    g = decode(&encode(g)).?;
+    try std.testing.expectEqual(@as(u8, 0), g.fleet.vessels[0].provisions);
+    try std.testing.expectEqual(s.Game.ExpeditionEvent.charted, g.advanceExpedition(0, g.fleet.vessels[0].legSeconds()));
+    try std.testing.expect(g.returnExpedition(0) != null);
+}
+
+test "expedition cargo to both sides of a bridge reserves room in the shared depot" {
+    var g = s.Game.init();
+    for ([_]usize{ 1, 2, 27 }) |island| g.chartHarbor(island);
+    g.charter = .{ .won = true, .ferried_to_bali = true, .housed_eight = true };
+    g.bridges[0] = true;
+    g.setTile(0, .{ .x = 55, .y = 44 }, .light);
+    g.people = 16;
+    g.island_people[0] = 4;
+    g.island_people[1] = 4;
+    g.land(27, 4, .{});
+    g.coins = 100;
+    for ([_]usize{ 2, 27 }) |island| {
+        g.store(island).* = .{ .timber = 50, .stone = 50, .grain = 50, .venison = 50, .fruit = 50, .water = 50 };
+        try std.testing.expect(g.buildShip(island, .brig) == null);
+    }
+    const capacity = std.math.maxInt(u16);
+    g.store(0).timber = capacity - 9;
+    g.store(1).timber = 100;
+    try std.testing.expect(g.sendExpedition(0, s.ocean.destinationIndex(0), 0, .{ .timber = 9 }) == null);
+    try std.testing.expect(g.sendExpedition(1, s.ocean.destinationIndex(1), 0, .{ .timber = 7 }) == null);
+    try std.testing.expect(!g.linked(0, 1));
+    g.paveBridge(0);
+    try std.testing.expect(g.linked(0, 1));
+    try std.testing.expectEqual(@as(u16, 16), g.incomingCargo(1).timber);
+    try std.testing.expectEqual(@as(u16, capacity - 16), g.stockOf(0).timber);
+    g = decode(&encode(g)).?;
+    for (0..2) |id| {
+        const seconds = g.fleet.vessels[id].legSeconds();
+        try std.testing.expectEqual(s.Game.ExpeditionEvent.delivered, g.advanceExpedition(id, seconds));
+    }
+    try std.testing.expectEqual(@as(u16, capacity), g.stockOf(1).timber);
+    try std.testing.expect(g.incomingCargo(0).empty());
+}
+
 test "concurrent cargo voyages reserve landing space and unload exactly once" {
     var g = s.Game.init();
     try std.testing.expect(g.build(0, s.Cell{ .x = 39, .y = 39 }, .cottage) == null);
@@ -936,6 +1209,7 @@ test "concurrent cargo voyages reserve landing space and unload exactly once" {
     g.ferry.origin = 1;
     g.ferry.destination = 1;
     g.openPort(1);
+    g.setTile(0, .{ .x = 55, .y = 44 }, .light);
     g.coins = 100;
     g.store(0).* = .{ .timber = 200, .stone = 50, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
     try std.testing.expect(g.buildShip(0, .brig) == null);
@@ -944,6 +1218,8 @@ test "concurrent cargo voyages reserve landing space and unload exactly once" {
     g.openPort(2);
     g.store(2).timber = std.math.maxInt(u16) - 10;
     try std.testing.expect(g.sendExpedition(0, 0, 2, .{ .timber = 6 }) == null);
+    try std.testing.expectEqualStrings("The destination dock has no free berth.", g.sendExpedition(1, 0, 2, .{ .timber = 4 }).?);
+    g.setTile(2, .{ .x = 35, .y = 27 }, .light);
     try std.testing.expect(g.sendExpedition(1, 0, 3, .{}) != null);
     try std.testing.expect(g.sendExpedition(1, 0, 2, .{ .timber = 5 }) != null);
     try std.testing.expect(g.sendExpedition(1, 0, 2, .{ .timber = 4 }) == null);

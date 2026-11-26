@@ -1,4 +1,5 @@
 const geography = @import("geography.zig");
+const baked = @import("expedition_routes.zig");
 
 pub const Ship = enum(u8) {
     none,
@@ -80,6 +81,53 @@ pub fn routeTo(chart: usize) ?usize {
         if (route.chart == chart) return index;
     }
     return null;
+}
+
+/// Keep the original destination indices used by existing commands and saves.
+pub const destination_count = routes.len + 2;
+pub const brig_leg_limit: u8 = 30;
+pub const direct_speed: f32 = 80;
+pub const barque_leg_limit: u8 = 60;
+
+pub fn destinationChart(index: usize) usize {
+    return if (index < routes.len) routes[index].chart else index - routes.len;
+}
+
+pub fn destinationIndex(chart: usize) usize {
+    return routeTo(chart) orelse routes.len + chart;
+}
+
+const direct_table: [geography.settlement_count][geography.settlement_count]?u16 = blk: {
+    var table: [geography.settlement_count][geography.settlement_count]?u16 = @splat(@splat(null));
+    for (baked.passages, 0..) |course, i| {
+        table[course.from][course.to] = @intCast(i);
+        table[course.to][course.from] = @intCast(i);
+    }
+    break :blk table;
+};
+
+pub fn directCourse(from: usize, to: usize) ?baked.Passage {
+    if (from >= geography.settlement_count or to >= geography.settlement_count) return null;
+    const index = direct_table[from][to] orelse return null;
+    return baked.passages[index];
+}
+
+/// Java's established passages keep their existing timing, range, and rations.
+/// Other crossings use the length of their direct open-water course.
+pub fn passage(from: usize, to: usize) ?Route {
+    if (from == 0 or to == 0) {
+        const other = @max(from, to);
+        if (other == 1) return .{ .chart = to, .leg_seconds = 9, .ship = .brig };
+        var route = routes[routeTo(other) orelse return null];
+        route.chart = to;
+        return route;
+    }
+    const course = directCourse(from, to) orelse return null;
+    return .{
+        .chart = to,
+        .leg_seconds = @floatFromInt(course.seconds),
+        .ship = if (course.seconds <= brig_leg_limit) .brig else .barque,
+    };
 }
 
 test "an expedition is provisioned for both legs and the landing" {

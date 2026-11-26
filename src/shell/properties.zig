@@ -83,9 +83,11 @@ fn settlementCase(seed: u64) !void {
     game.openPort(route.chart);
     game.store(0).* = stock(600);
     game.store(route.chart).* = stock(random.intRangeAtMost(u16, 0, 200));
+    game.setTile(0, .{ .x = 55, .y = 44 }, .light);
+    game.setTile(route.chart, .{ .x = 35, .y = 27 }, .light);
 
     const hull = domain.shipCost(.brig);
-    for (0..domain.dock_capacity) |id| {
+    for (0..domain.max_dock_capacity) |id| {
         const origin = game.store(0).*;
         const coins = game.coins;
         try std.testing.expect(gameplay.apply(&game, .{ .build_ship = .{ .island = 0, .hull = .brig } }) == .applied);
@@ -99,7 +101,7 @@ fn settlementCase(seed: u64) !void {
     const initial_stock = game.store(route.chart).*;
     var expected_arrival = initial_stock;
     var expected_passengers: u16 = 0;
-    for (0..domain.dock_capacity) |id| {
+    for (0..domain.max_dock_capacity) |id| {
         const passengers = random.intRangeAtMost(u16, 1, 2);
         const cargo = stock(random.intRangeAtMost(u16, 1, 6));
         const provisions = game.oceanRations(id, route_index, passengers);
@@ -131,7 +133,7 @@ fn settlementCase(seed: u64) !void {
     var restored = save.decode(&encoded) orelse return error.CouldNotRestore;
     try std.testing.expectEqualSlices(u8, &encoded, &save.encode(restored));
     const complete = gameplay.advanceVoyages(&restored, route.leg_seconds);
-    try std.testing.expectEqual(@as(usize, domain.dock_capacity), complete.len);
+    try std.testing.expectEqual(@as(usize, domain.max_dock_capacity), complete.len);
     var reported: u16 = 0;
     for (complete.slice()) |arrival| {
         try std.testing.expectEqual(route.chart, arrival.expedition.island);

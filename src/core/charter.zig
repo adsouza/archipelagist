@@ -30,7 +30,7 @@ pub const Goal = enum {
         return switch (goal) {
             .house_settlers => "House and feed 8 settlers",
             .ferry_settlers => "Ferry settlers to Bali",
-            .lighthouse => "Raise the lighthouse",
+            .lighthouse => "Raise Bali's lighthouse",
             .bridge => "Bridge the islands",
             .build_brig => "Build a survey brig",
             .chart_lombok => "Chart Lombok",

@@ -87,6 +87,18 @@ pub fn build(b: *std.Build) void {
     bake.setCwd(b.path("."));
     b.step("bake-lanes", "Regenerate src/core/ferry_lanes.zig from the geography").dependOn(&bake.step);
 
+    const bake_expeditions = b.addRunArtifact(b.addExecutable(.{
+        .name = "bake-expeditions",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/bake_expeditions.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "core", .module = host.core }},
+        }),
+    }));
+    bake_expeditions.setCwd(b.path("."));
+    b.step("bake-expeditions", "Regenerate the direct expedition sea passages").dependOn(&bake_expeditions.step);
+
     const check_deps = b.addRunArtifact(b.addExecutable(.{
         .name = "check-deps",
         .root_module = b.createModule(.{

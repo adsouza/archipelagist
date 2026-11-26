@@ -14,12 +14,13 @@ const save = @import("save.zig");
 pub const magic = "AJNL";
 /// Bump when the encoding of `gameplay.Command` or a record changes.
 /// The golden-bytes test below fails when the layout changes without it.
-pub const version: u16 = 5;
+pub const version: u16 = 8;
 pub const header = magic.* ++ std.mem.toBytes(std.mem.nativeToLittle(u16, version));
 
 pub const Kind = enum(u8) { snapshot = 1, command = 2, checkpoint = 3 };
 pub const record_header_bytes = 1 + 4;
-pub const max_command_bytes = 64;
+pub const max_command_bytes = 1 + @sizeOf(u64) + encoded_name_bytes;
+const encoded_name_bytes = 1 + domain.town_name_bytes + 1;
 
 pub const Checkpoint = struct { day: u32, fingerprint: u64 };
 
@@ -74,6 +75,7 @@ fn putValue(comptime T: type, value: T, out: *CommandBytes) void {
             putValue(Bits, @bitCast(value), out);
         },
         .@"enum" => |info| putValue(info.tag_type, @backingInt(value), out),
+        .array => for (value) |item| putValue(@TypeOf(item), item, out),
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| putValue(Field, @field(value, name), out),
         .@"union" => |info| {
             const tag = std.meta.activeTag(value);
@@ -121,6 +123,11 @@ fn takeValue(comptime T: type, cursor: *Cursor) !T {
             return @bitCast(try takeValue(Bits, cursor));
         },
         .@"enum" => |info| return std.enums.fromInt(T, try takeValue(info.tag_type, cursor)) orelse error.InvalidRecord,
+        .array => |info| {
+            var value: T = undefined;
+            for (&value) |*item| item.* = try takeValue(info.child, cursor);
+            return value;
+        },
         .@"struct" => |info| {
             var value: T = undefined;
             inline for (info.field_names, info.field_types) |name, Field| @field(value, name) = try takeValue(Field, cursor);
@@ -355,6 +362,7 @@ test "every command kind round-trips through the journal encoding" {
         .{ .return_expedition = 2 },
         .{ .export_grain = 4 },
         .{ .advance = 0.016666668 },
+        .{ .rename_town = .{ .island = 0, .name = domain.TownName.parse("Port Sélène").? } },
     };
     // Every variant is covered so new commands cannot be left out of the journal.
     try std.testing.expectEqual(@typeInfo(gameplay.Command).@"union".field_names.len, commands.len);
@@ -372,7 +380,7 @@ test "the journal layout is pinned so a format change bumps the version" {
     const ferry = encodeCommand(.{ .send_ferry = .{ .destination = 2, .manifest = .{ .settlers = 1, .cargo = .{} } } });
     const expected_ferry = [_]u8{3} ++ [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0 } ++ [_]u8{ 1, 0 } ++ @as([12]u8, @splat(0));
     try std.testing.expectEqualSlices(u8, &expected_ferry, ferry.slice());
-    try std.testing.expectEqual(@as(u16, 5), version);
+    try std.testing.expectEqual(@as(u16, 8), version);
 }
 
 test "malformed command bytes are rejected rather than misread" {
@@ -398,6 +406,72 @@ test "a journal cut off mid-record replays the complete prefix" {
     try std.testing.expect(report.truncated);
     try std.testing.expectEqual(@as(u64, 1), report.commands);
     try std.testing.expectError(error.NotAJournal, replay("nope", .{}));
+}
+
+test "town square and apartment construction grow housing and survive saves and replay" {
+    var game = domain.Game.init();
+    game.people = 4;
+    game.store(0).timber = 15;
+    game.store(0).stone = 24;
+    const cottage = domain.Cell{ .x = 44, .y = 39 };
+    const square = domain.Cell{ .x = 45, .y = 42 };
+    const blocked = domain.Cell{ .x = 45, .y = 43 };
+    const upgrade = gameplay.Command{ .build = .{ .island = 0, .cell = cottage, .kind = .apartment } };
+    const plaza = gameplay.Command{ .build = .{ .island = 0, .cell = square, .kind = .plaza } };
+    const day = gameplay.Command{ .advance = domain.day_seconds };
+    const rename = gameplay.Command{ .rename_town = .{ .island = 0, .name = domain.TownName.parse("Port Sélène 港 🌊").? } };
+    var builder = try Builder.init(std.testing.allocator, .{ .game = game });
+    defer builder.deinit();
+
+    try std.testing.expect(game.connected(0, cottage));
+    try std.testing.expectEqual(@as(u16, 0), game.freeBeds(0));
+    try std.testing.expect((try builder.dispatch(&game, upgrade)) == .denied);
+    try std.testing.expect((try builder.dispatch(&game, rename)) == .denied);
+    const before = game.stockOf(0);
+    try std.testing.expectEqual(domain.Kind.empty, game.tileAt(0, blocked));
+    try std.testing.expect((try builder.dispatch(&game, .{ .build = .{ .island = 0, .cell = blocked, .kind = .plaza } })) == .denied);
+    try std.testing.expectEqualDeep(before, game.stockOf(0));
+    try std.testing.expectEqual(domain.Kind.empty, game.tileAt(0, blocked));
+
+    try std.testing.expect((try builder.dispatch(&game, plaza)) == .applied);
+    try std.testing.expect((try builder.dispatch(&game, rename)) == .applied);
+    try std.testing.expectEqualStrings("Port Sélène 港 🌊", game.townName(0).?);
+    try std.testing.expect(game.townName(1) == null);
+    const footprint = domain.plazaCells(square);
+    for (footprint, 0..) |cell, i| {
+        try std.testing.expectEqual(if (i == 0) domain.Kind.plaza else domain.Kind.plaza_paving, game.tileAt(0, cell));
+        try std.testing.expectEqualDeep(square, game.plazaAnchor(0, cell).?);
+        try std.testing.expect(game.connected(0, cell));
+    }
+    try std.testing.expectEqual(@as(u16, 4), game.housing(0));
+    const stock = game.stockOf(0);
+    try std.testing.expectEqual(@as(u16, 11), stock.timber);
+    try std.testing.expectEqual(@as(u16, 8), stock.stone);
+    try std.testing.expect((try builder.dispatch(&game, upgrade)) == .denied);
+    try std.testing.expectEqualDeep(stock, game.stockOf(0));
+    try std.testing.expectEqual(domain.Kind.cottage, game.tileAt(0, cottage));
+
+    _ = try builder.dispatch(&game, day);
+    try std.testing.expectEqual(@as(u16, 4), game.residents(0));
+    try std.testing.expect((try builder.dispatch(&game, upgrade)) == .applied);
+    try std.testing.expectEqual(domain.Kind.apartment, game.tileAt(0, cottage));
+    try std.testing.expect(game.connected(0, cottage));
+    try std.testing.expectEqual(@as(u16, 12), game.housing(0));
+    try std.testing.expectEqual(@as(u16, 8), game.freeBeds(0));
+    try std.testing.expectEqual(@as(u16, 0), game.stockOf(0).timber);
+    try std.testing.expectEqual(@as(u16, 0), game.stockOf(0).stone);
+    try std.testing.expect((try builder.dispatch(&game, upgrade)) == .denied);
+    _ = try builder.dispatch(&game, day);
+    try std.testing.expectEqual(@as(u16, 5), game.residents(0));
+
+    var session = save.Session{ .game = game };
+    try std.testing.expectEqualDeep(session, save.Session.decodeSession(&session.encodeSession()).?);
+    const report = try replay(builder.list.items, .{});
+    try std.testing.expect(report.divergence == null);
+    try std.testing.expectEqualDeep(game, report.session.game);
+
+    session.game.setTile(0, footprint[3], .empty);
+    try std.testing.expect(save.Session.decodeSession(&session.encodeSession()) == null);
 }
 
 test "a checkpoint that disagrees with the replayed state is reported as a divergence" {

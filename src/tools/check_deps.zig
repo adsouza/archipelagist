@@ -31,7 +31,7 @@ pub const policy = [_]Folder{
         .name = "core",
         .modules = &.{},
         .layers = &.{
-            .{ .files = &.{ "terrain.zig", "island_grids.zig", "settlement_sites.zig", "ferry_lanes.zig" } },
+            .{ .files = &.{ "terrain.zig", "island_grids.zig", "settlement_sites.zig", "ferry_lanes.zig", "expedition_routes.zig" } },
             .{ .files = &.{"geography.zig"} },
             .{ .files = &.{"region.zig"} },
             .{ .files = &.{"expedition.zig"} },
@@ -58,7 +58,7 @@ pub const policy = [_]Folder{
         .modules = &.{ "builtin", "core", "shell", "raylib" },
         .layers = &.{
             .{ .files = &.{ "audio.zig", "window_settings.zig" } },
-            .{ .files = &.{"art.zig"} },
+            .{ .files = &.{ "art.zig", "town_text.zig" } },
             .{ .files = &.{"chart.zig"} },
             .{ .files = &.{ "main.zig", "presentation_tests.zig" } },
         },
@@ -67,7 +67,7 @@ pub const policy = [_]Folder{
         .name = "tools",
         .modules = &.{ "builtin", "core" },
         .layers = &.{
-            .{ .files = &.{ "replay.zig", "bake_lanes.zig", "check_deps.zig", "link_bin.zig" } },
+            .{ .files = &.{ "replay.zig", "bake_lanes.zig", "bake_expeditions.zig", "check_deps.zig", "link_bin.zig" } },
         },
     },
 };
