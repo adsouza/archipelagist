@@ -345,9 +345,9 @@ pub const Builder = struct {
 test "every command kind round-trips through the journal encoding" {
     const commands = [_]gameplay.Command{
         .{ .build = .{ .island = 3, .cell = .{ .x = 12, .y = 40 }, .kind = .well } },
-        .build_bridge,
-        .{ .cross_bridge = 1 },
-        .{ .transfer_stores = .{ .source = 0, .cargo = .{ .timber = 4, .water = 9 } } },
+        .{ .build_bridge = 1 },
+        .{ .cross_bridge = .{ .crossing = 1, .destination = 0 } },
+        .{ .transfer_stores = .{ .crossing = 0, .source = 0, .cargo = .{ .timber = 4, .water = 9 } } },
         .{ .survey_harbor = .{ .destination = 2, .manifest = .{ .settlers = 3, .cargo = .{ .water = 4 } } } },
         .{ .send_ferry = .{ .destination = 1, .manifest = .{ .settlers = 2, .cargo = .{ .grain = 6 } } } },
         .{ .sail_ferry = 0 },
@@ -383,7 +383,9 @@ test "malformed command bytes are rejected rather than misread" {
     var bytes = encodeCommand(.{ .build = .{ .island = 0, .cell = .{ .x = 1, .y = 1 }, .kind = .road } });
     bytes.bytes[bytes.len - 1] = 15; // not a building kind
     try std.testing.expectError(error.InvalidRecord, decodeCommand(bytes.slice()));
-    try std.testing.expectError(error.InvalidRecord, decodeCommand(&(encodeCommand(.build_bridge).bytes[0..1].* ++ [_]u8{0})));
+    var trailing = encodeCommand(.{ .sail_ferry = 0 });
+    trailing.bytes[trailing.len] = 0;
+    try std.testing.expectError(error.InvalidRecord, decodeCommand(trailing.bytes[0 .. trailing.len + 1]));
 }
 
 test "a journal cut off mid-record replays the complete prefix" {

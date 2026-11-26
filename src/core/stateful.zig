@@ -36,7 +36,7 @@ pub const Scenario = enum {
             game.people = 8;
             game.ferry.surveyed = true;
             game.charter.won = true;
-            game.bridge = true;
+            game.bridges[0] = true;
             game.charter.ferried_to_bali = true;
             game.openPort(1);
         }
@@ -57,6 +57,16 @@ fn ferryHarbor(random: std.Random) usize {
     return if (pick == 0) 0 else if (pick == 1) 1 else near.items[pick - 2];
 }
 
+fn bridgeCrossing(random: std.Random) usize {
+    return random.uintLessThan(usize, domain.crossings.len + 1);
+}
+
+/// Mostly an island some bridge reaches, sometimes one none does.
+fn bridgeEnd(random: std.Random) usize {
+    const ends = [_]usize{ 0, 1, domain.bridge.madura, 2 };
+    return ends[random.uintLessThan(usize, ends.len)];
+}
+
 /// Commands are generated without looking at the state, so any subsequence
 /// of a failing sequence is still a meaningful sequence to shrink to.
 pub fn randomCommand(random: std.Random) Command {
@@ -73,9 +83,9 @@ pub fn randomCommand(random: std.Random) Command {
                 .kind = kinds[random.uintLessThan(usize, kinds.len)],
             } };
         },
-        2 => .build_bridge,
-        3 => .{ .cross_bridge = random.uintLessThan(usize, 3) },
-        4 => .{ .transfer_stores = .{ .source = random.uintLessThan(usize, 3), .cargo = uniform(random.intRangeAtMost(u16, 0, 6)) } },
+        2 => .{ .build_bridge = bridgeCrossing(random) },
+        3 => .{ .cross_bridge = .{ .crossing = bridgeCrossing(random), .destination = bridgeEnd(random) } },
+        4 => .{ .transfer_stores = .{ .crossing = bridgeCrossing(random), .source = bridgeEnd(random), .cargo = uniform(random.intRangeAtMost(u16, 0, 6)) } },
         5 => .{ .survey_harbor = .{ .destination = ferryHarbor(random), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 5),
             .cargo = uniform(random.intRangeAtMost(u16, 0, 5)),

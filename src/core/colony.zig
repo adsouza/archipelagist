@@ -28,6 +28,9 @@ pub const camp_capacity = ferry.camp_capacity;
 pub const ferryRations = ferry.ferryRations;
 pub const Ferry = ferry.Ferry;
 pub const bridgeheads = bridge.bridgeheads;
+pub const Crossing = bridge.Crossing;
+pub const crossings = bridge.crossings;
+pub const strait = bridge.strait;
 pub const bridge_crew = bridge.bridge_crew;
 pub const max_bridge_spans = bridge.max_bridge_spans;
 pub const bridge_spans = bridge.bridge_spans;
@@ -251,7 +254,7 @@ pub const Game = struct {
     tiles: [geography.tile_count]Tile = @splat(.{}),
     stores: [settlement_count]Stores = .{starting_stores} ++ @as([settlement_count - 1]Stores, @splat(.{})),
     diets: [settlement_count]Diet = @splat(.{}),
-    bridge: bool = false,
+    bridges: bridge.Bridges = @splat(false),
     coins: u16 = 8,
     people: u16 = 2,
     island_people: [settlement_count - 1]u16 = @splat(0),
@@ -300,6 +303,7 @@ pub const Game = struct {
     pub const bridgeProblem = bridge.bridgeProblem;
     pub const buildBridge = bridge.buildBridge;
     pub const crossBridge = bridge.crossBridge;
+    pub const hasBridge = bridge.hasBridge;
     // charter.zig
     pub const charterComplete = charter.charterComplete;
     pub const hasFounded = charter.hasFounded;
@@ -1062,7 +1066,7 @@ test "charter reports the next three goals and remembers past population" {
     try std.testing.expectEqualDeep([3]?Goal{ .house_settlers, .lighthouse, .bridge }, g.nextGoals());
     g.charter.housed_eight = true;
     g.charter.won = true;
-    g.bridge = true;
+    g.bridges[0] = true;
     try std.testing.expectEqualDeep([3]?Goal{ .build_brig, .chart_lombok, .build_barque }, g.nextGoals());
     g.fleet.vessels[0].ship = .barque;
     g.fleet.count = 1;

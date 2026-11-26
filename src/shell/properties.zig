@@ -42,7 +42,8 @@ fn rejectionCase(seed: u64) !void {
         1 => std.math.nan(f32),
         else => domain.day_seconds + 0.001 + random.float(f32) * 100,
     } });
-    try rejected(&game, .{ .cross_bridge = domain.settlement_count + random.intRangeAtMost(usize, 1, 100) });
+    try rejected(&game, .{ .cross_bridge = .{ .crossing = 0, .destination = domain.settlement_count + random.intRangeAtMost(usize, 1, 100) } });
+    try rejected(&game, .{ .build_bridge = domain.crossings.len + random.intRangeAtMost(usize, 0, 100) });
 
     game.ferry.surveyed = true;
     game.openPort(1);
@@ -72,7 +73,7 @@ fn settlementCase(seed: u64) !void {
     game.coins = 300;
     game.ferry.surveyed = true;
     game.charter.won = true;
-    game.bridge = true;
+    game.bridges[0] = true;
     game.charter.ferried_to_bali = true;
     game.ferry.origin = 1;
     game.ferry.destination = 1;
@@ -319,9 +320,13 @@ fn randomCommand(random: std.Random, game: *const domain.Game) gameplay.Command 
             const kinds = [_]domain.Kind{ .cottage, .grove, .farm, .road, .quarry, .lodge, .well, .light };
             break :blk .{ .build = .{ .island = island, .cell = cell, .kind = kinds[random.uintLessThan(usize, kinds.len)] } };
         },
-        2 => .build_bridge,
-        3 => .{ .cross_bridge = random.uintLessThan(usize, 3) },
-        4 => .{ .transfer_stores = .{ .source = random.uintLessThan(usize, 3), .cargo = stock(random.intRangeAtMost(u16, 0, 4)) } },
+        2 => .{ .build_bridge = random.uintLessThan(usize, domain.crossings.len + 1) },
+        3 => .{ .cross_bridge = .{ .crossing = random.uintLessThan(usize, domain.crossings.len + 1), .destination = random.uintLessThan(usize, 3) } },
+        4 => .{ .transfer_stores = .{
+            .crossing = random.uintLessThan(usize, domain.crossings.len + 1),
+            .source = random.uintLessThan(usize, 3),
+            .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
+        } },
         5 => .{ .survey_harbor = .{ .destination = random.uintLessThan(usize, 3), .manifest = .{
             .settlers = random.intRangeAtMost(u16, 0, 5),
             .cargo = stock(random.intRangeAtMost(u16, 0, 4)),
@@ -362,7 +367,7 @@ fn journalCase(seed: u64) !void {
         game.people = 8;
         game.ferry.surveyed = true;
         game.charter.won = true;
-        game.bridge = true;
+        game.bridges[0] = true;
         game.charter.ferried_to_bali = true;
         game.openPort(1);
     }

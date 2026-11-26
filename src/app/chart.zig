@@ -135,7 +135,7 @@ pub const View = struct {
         const lower_right = self.world(a.v(895, 576));
         a.sea(time, upper_left, lower_right);
         a.regionalLand(upper_left, lower_right);
-        if (preview_bridge and !g.bridge) a.drawBridge(false);
+        if (preview_bridge and !g.bridges[s.strait]) a.drawBridge(s.strait, false);
         const show_settlements = self.zoom >= settlement_detail_zoom;
         for (0..s.settlement_count) |chart| {
             if (!show_settlements) break;
@@ -150,9 +150,10 @@ pub const View = struct {
             a.island(g, chart, area, h, time, if (g.constructionProblem(chart) == null) tool else .empty, self.zoom >= 1.15);
             r.gl.rlPopMatrix();
         }
-        if (g.bridge) {
-            a.drawBridge(true);
-            a.bridgeTraffic(g, time);
+        for (g.bridges, 0..) |built, crossing| {
+            if (!built) continue;
+            a.drawBridge(crossing, true);
+            a.bridgeTraffic(g, crossing, time);
         }
         a.ship(g, time);
         for (g.vessels(), 0..) |_, id| a.explorationShip(g, id, time);

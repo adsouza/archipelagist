@@ -55,7 +55,7 @@ pub const Charter = struct {
 };
 
 pub fn charterComplete(g: *const Game) bool {
-    return g.charter.won and g.bridge and g.charter.ferried_to_bali;
+    return g.charter.won and g.bridges[0] and g.charter.ferried_to_bali;
 }
 
 pub fn hasFounded(g: *const Game, chart: usize) bool {
@@ -75,7 +75,7 @@ pub fn nextGoals(g: *const Game) [3]?Goal {
             .house_settlers => g.charter.housed_eight or g.people >= 8,
             .ferry_settlers => g.charter.ferried_to_bali,
             .lighthouse => g.charter.won,
-            .bridge => g.bridge,
+            .bridge => g.bridges[0],
             .build_brig => g.fleet.count != 0,
             .chart_lombok => g.fleet.charted[0],
             .build_barque => g.hasBarque(),

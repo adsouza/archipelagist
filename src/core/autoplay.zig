@@ -216,7 +216,7 @@ pub const Player = struct {
             @field(wants, name) = (6 * shortfall) -| @field(ledger.stock, name);
         }
         const lighthouse: u16 = if (g.charter.won) 0 else domain.costs[@backingInt(Kind.light)];
-        const bridge = if (g.bridge) Stores{} else domain.bridge_cost;
+        const bridge = if (g.bridges[0]) Stores{} else domain.bridge_cost;
         const building: u16 = 16;
         wants.timber = (lighthouse + bridge.timber + building) -| g.stores[bali].timber;
         wants.stone = (bridge.stone + domain.well_stone) -| g.stores[bali].stone;
@@ -236,7 +236,7 @@ pub const Player = struct {
         if (survey) {
             if (moored != java or g.coins < 20 or g.people < 4) return;
         } else {
-            if (g.bridge) return p.overland();
+            if (g.bridges[0]) return p.overland();
             if (moored == bali) {
                 if (p.act(.{ .sail_ferry = java })) p.log.note(g, "ferry returns to Java", .{});
                 return;
@@ -283,18 +283,18 @@ pub const Player = struct {
         const g = &p.game;
         const wants = p.baliWants(0);
         const keep = p.javaKeeps();
-        const limits = g.bridgeCargoLimit(java);
+        const limits = g.bridgeCargoLimit(domain.strait, java);
         var load = Stores{};
         inline for (domain.store_fields) |name| {
             @field(load, name) = @min(@field(wants, name), @field(limits, name) -| @field(keep, name));
         }
-        if (!load.empty() and p.act(.{ .transfer_stores = .{ .source = java, .cargo = load } }))
+        if (!load.empty() and p.act(.{ .transfer_stores = .{ .crossing = domain.strait, .source = java, .cargo = load } }))
             p.log.note(g, "carried {any} over the bridge", .{load});
     }
 
     fn charter(p: *Player) void {
         const g = &p.game;
-        if (!g.bridge and g.bridgeProblem() == null and p.act(.build_bridge)) p.log.note(g, "bridge built", .{});
+        if (!g.bridges[domain.strait] and g.bridgeProblem(domain.strait) == null and p.act(.{ .build_bridge = domain.strait })) p.log.note(g, "bridge built", .{});
         if (!g.charter.won and g.coins >= 30 and g.people >= 8 and p.timber(bali) >= domain.costs[@backingInt(Kind.light)]) {
             _ = p.placeOnOpenGround(bali, .light);
         }

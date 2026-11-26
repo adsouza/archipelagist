@@ -725,7 +725,7 @@ test "the ferry surveys Lombok from Bali and carries settlers and stores there" 
     try std.testing.expectEqual(@as(?usize, 1), g.mooredChart());
     try std.testing.expectEqualStrings("Complete the island charter to explore farther.", g.ferrySurveyProblem(2).?);
     g.charter = .{ .ferried_to_bali = true, .won = true, .housed_eight = true };
-    g.bridge = true;
+    g.bridges[0] = true;
     try std.testing.expect(g.surveyByFerry(2, 0, .{}) == null);
     g.advanceShip(legSeconds(1, 2));
     try std.testing.expect(g.islandOpen(2));

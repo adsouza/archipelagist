@@ -2507,5 +2507,8 @@ pub const port_layouts = [_][]const Placement{
     },
 };
 
+/// The Bali Strait crossing, from Java's eastern tip.
 pub const bridgeheads = [2][2]u16{ .{ 71, 12 }, .{ 7, 36 } };
 pub const bali_lombok_bridgeheads = [2][2]u16{ .{ 39, 9 }, .{ 20, 43 } };
+/// The narrowest crossing of the Madura Strait, from Java's north coast.
+pub const java_madura_bridgeheads = [2][2]u16{ .{ 36, 4 }, .{ 7, 18 } };

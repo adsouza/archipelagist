@@ -302,43 +302,45 @@ fn berth(chart: usize) V {
     return toV(s.ferry.berth(chart));
 }
 
-fn bridgePoint(progress: f32, y_offset: f32) V {
-    const start = worldPoint(0, tile(s.bridgeheads[0]));
-    const end = worldPoint(1, tile(s.bridgeheads[1]));
+fn bridgePoint(crossing: usize, progress: f32, y_offset: f32) V {
+    const plan = s.crossings[crossing];
+    const start = worldPoint(plan.charts[0], tile(plan.heads[0]));
+    const end = worldPoint(plan.charts[1], tile(plan.heads[1]));
     return v(std.math.lerp(start.x, end.x, progress), std.math.lerp(start.y, end.y, progress) + y_offset);
 }
 
-pub fn drawBridge(built: bool) void {
+pub fn drawBridge(crossing: usize, built: bool) void {
+    const spans = s.crossings[crossing].spans;
     if (!built) {
-        const marks = s.bridge_spans * 4;
+        const marks = spans * 4;
         for (0..marks) |i| {
-            line(bridgePoint(f(i) / f(marks), -3), bridgePoint((f(i) + 0.6) / f(marks), -3), 2, 0xe1d5a5);
+            line(bridgePoint(crossing, f(i) / f(marks), -3), bridgePoint(crossing, (f(i) + 0.6) / f(marks), -3), 2, 0xe1d5a5);
         }
         return;
     }
-    line(bridgePoint(0, 15), bridgePoint(1, 15), 17, 0x487f80);
-    for (1..s.bridge_spans) |i| {
-        const p = bridgePoint(f(i) / f(s.bridge_spans), 0);
+    line(bridgePoint(crossing, 0, 15), bridgePoint(crossing, 1, 15), 17, 0x487f80);
+    for (1..spans) |i| {
+        const p = bridgePoint(crossing, f(i) / f(spans), 0);
         diamond(p.x, p.y + 18, 12, 6, 0x386c73);
         quad(v(p.x - 7, p.y - 6), v(p.x + 7, p.y - 6), v(p.x + 9, p.y + 14), v(p.x - 9, p.y + 14), 0x8a9690);
         line(v(p.x - 9, p.y + 13), v(p.x + 9, p.y + 13), 3, 0xaeb6a5);
     }
-    line(bridgePoint(0, 0), bridgePoint(1, 0), 16, 0x644d3b);
-    line(bridgePoint(0, -3), bridgePoint(1, -3), 12, 0xc59b68);
-    const planks = s.bridge_spans * 9;
+    line(bridgePoint(crossing, 0, 0), bridgePoint(crossing, 1, 0), 16, 0x644d3b);
+    line(bridgePoint(crossing, 0, -3), bridgePoint(crossing, 1, -3), 12, 0xc59b68);
+    const planks = spans * 9;
     for (0..planks + 1) |i| {
         const t = f(i) / f(planks);
-        line(bridgePoint(t, -8), bridgePoint(t, 2), 1, 0x9b7955);
+        line(bridgePoint(crossing, t, -8), bridgePoint(crossing, t, 2), 1, 0x9b7955);
     }
-    line(bridgePoint(0, -8), bridgePoint(1, -8), 2, 0xefd8a0);
-    line(bridgePoint(0, 3), bridgePoint(1, 3), 2, 0x876448);
+    line(bridgePoint(crossing, 0, -8), bridgePoint(crossing, 1, -8), 2, 0xefd8a0);
+    line(bridgePoint(crossing, 0, 3), bridgePoint(crossing, 1, 3), 2, 0x876448);
 }
 
-pub fn bridgeTraffic(g: *const s.Game, t: f32) void {
-    for (0..2) |chart| {
+pub fn bridgeTraffic(g: *const s.Game, crossing: usize, t: f32) void {
+    for (s.crossings[crossing].charts, 0..) |chart, side| {
         if (g.residents(chart) == 0) continue;
-        const progress = 0.5 - 0.46 * @cos(t * 0.22 + f(chart) * 2.3);
-        settler(bridgePoint(progress, if (chart == 0) -4 else 0), if (chart == 0) 0x855a46 else 0x456870);
+        const progress = 0.5 - 0.46 * @cos(t * 0.22 + f(side) * 2.3 + f(crossing));
+        settler(bridgePoint(crossing, progress, if (side == 0) -4 else 0), if (side == 0) 0x855a46 else 0x456870);
     }
 }
 

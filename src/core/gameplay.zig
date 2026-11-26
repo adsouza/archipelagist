@@ -9,9 +9,11 @@ pub const Manifest = struct {
 
 pub const Command = union(enum) {
     build: struct { island: usize, cell: domain.Cell, kind: domain.Kind },
-    build_bridge,
-    cross_bridge: usize,
-    transfer_stores: struct { source: usize, cargo: domain.Stores },
+    /// Bridge a crossing in `domain.crossings`.
+    build_bridge: usize,
+    /// Walk a settler over a bridge to one of its islands.
+    cross_bridge: struct { crossing: usize, destination: usize },
+    transfer_stores: struct { crossing: usize, source: usize, cargo: domain.Stores },
     /// Send the ferry's crew to chart a harbor in range of its mooring.
     /// Settlers and cargo aboard found a camp there on arrival.
     survey_harbor: struct { destination: usize, manifest: Manifest },
@@ -102,9 +104,9 @@ pub fn apply(game: *domain.Game, command: Command) Outcome {
             game.build(c.island, c.cell, c.kind)
         else
             "Choose an island on the chart.",
-        .build_bridge => game.buildBridge(),
-        .cross_bridge => |island| if (island <= 1) game.crossBridge(island) else "Choose Java or Bali.",
-        .transfer_stores => |c| if (c.source <= 1) game.sendCargo(c.source, c.cargo) else "Choose Java or Bali.",
+        .build_bridge => |crossing| game.buildBridge(crossing),
+        .cross_bridge => |c| game.crossBridge(c.crossing, c.destination),
+        .transfer_stores => |c| game.sendCargo(c.crossing, c.source, c.cargo),
         .survey_harbor => |c| game.surveyByFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .send_ferry => |c| game.sendFerry(c.destination, c.manifest.settlers, c.manifest.cargo),
         .sail_ferry => |chart| game.sailFerry(chart),
@@ -193,13 +195,14 @@ test "after the charter ends only the clock may be advanced" {
     try std.testing.expect(apply(&game, .{ .advance = 1 }) == .advanced);
 }
 
-test "overland transfers start only from Java or Bali" {
+test "overland transfers start only from an island on that bridge" {
     var game = domain.Game.init();
-    game.bridge = true;
+    game.bridges[0] = true;
     game.ferry.surveyed = true;
     game.openPort(1);
-    try std.testing.expectEqualStrings("Choose Java or Bali.", apply(&game, .{ .transfer_stores = .{ .source = 2, .cargo = .{ .timber = 1 } } }).problem().?);
+    try std.testing.expectEqualStrings("Choose an island on that bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 2, .cargo = .{ .timber = 1 } } }).problem().?);
+    try std.testing.expectEqualStrings("Choose a bridge.", apply(&game, .{ .transfer_stores = .{ .crossing = domain.crossings.len, .source = 0, .cargo = .{ .timber = 1 } } }).problem().?);
     game.stores[1].timber = 3;
-    try std.testing.expect(apply(&game, .{ .transfer_stores = .{ .source = 1, .cargo = .{ .timber = 1 } } }) == .applied);
+    try std.testing.expect(apply(&game, .{ .transfer_stores = .{ .crossing = 0, .source = 1, .cargo = .{ .timber = 1 } } }) == .applied);
     try std.testing.expectEqual(@as(u16, 2), game.stores[1].timber);
 }

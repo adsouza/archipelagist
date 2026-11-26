@@ -84,7 +84,10 @@ const Modal = enum { none, restart, bridge, shipyard, manifest };
 const ShipyardTab = enum { ferry, expedition, build };
 /// What the manifest dialog loads: the ferry bound for a harbor, an
 /// expedition on a route, or a bridge transfer from an island.
-const Loading = union(enum) { ferry: Voyage, expedition: Voyage, bridge: usize };
+const Loading = union(enum) { ferry: Voyage, expedition: Voyage, bridge: Transfer };
+
+/// Stores carried over a bridge from one of its islands.
+const Transfer = struct { crossing: usize, source: usize };
 
 /// A passage to load: the ferry's destination harbor or a ship's route.
 /// A survey charts the harbor first and lands everyone aboard on arrival.
@@ -111,6 +114,8 @@ const UI = struct {
     shipyard_tab: ShipyardTab = .ferry,
     shipyard_page: usize = 0,
     ship_id: usize = 0,
+    /// The bridge the bridge dialog shows, an index into `s.crossings`.
+    crossing: usize = s.strait,
     loading: Loading = .{ .ferry = .{ .to = 0 } },
     cargo_manifest: s.Stores = .{},
     boarding: u16 = 0,
@@ -231,53 +236,103 @@ const UI = struct {
         u.modal_note = null;
     }
 
+    /// A bridge is built, or both of its islands are open to plan one.
+    fn bridgePlannable(u: *const UI, crossing: usize) bool {
+        const c = s.crossings[crossing];
+        return u.g.bridges[crossing] or (u.g.islandOpen(c.charts[0]) and u.g.islandOpen(c.charts[1]));
+    }
+
+    /// Show the Bridges button once a second crossing can be planned or any bridge stands.
+    fn showBridgesButton(u: *const UI) bool {
+        for (0..s.crossings.len) |crossing| {
+            if (u.g.bridges[crossing] or (crossing != s.strait and u.bridgePlannable(crossing))) return true;
+        }
+        return false;
+    }
+
+    /// Open the bridge dialog on the selected island's bridge, if it has one.
+    fn openBridges(u: *UI, preferred: ?usize) void {
+        u.modal = .bridge;
+        u.modal_note = null;
+        u.crossing = preferred orelse blk: {
+            for (s.crossings, 0..) |c, crossing| {
+                if (c.charts[1] == u.store_chart and u.bridgePlannable(crossing)) break :blk crossing;
+            }
+            for (0..s.crossings.len) |crossing| {
+                if (u.bridgePlannable(crossing)) break :blk crossing;
+            }
+            break :blk s.strait;
+        };
+    }
+
     fn bridgeDialog(u: *UI) void {
+        const crossing = u.crossing;
+        const c = s.crossings[crossing];
+        const built = u.g.bridges[crossing];
+        const names = [2][:0]const u8{ s.chart_names[c.charts[0]], s.chart_names[c.charts[1]] };
         const top: f32 = 182;
-        const footer_y: f32 = if (u.g.bridge) 544 else 513;
+        const footer_y: f32 = if (built) 544 else 513;
         a.rect(280, top, 640, footer_y + 63 - top, paper);
         a.rect(280, top, 640, 6, gold);
-        label(if (u.g.bridge) "Island bridge" else "Bridge the islands", 309, 215, 36, ink, true);
-        if (u.g.bridge) {
+        var title: [64]u8 = undefined;
+        label(std.fmt.bufPrintSentinel(&title, "{s} to {s} bridge", .{ names[0], names[1] }, 0) catch unreachable, 309, 215, 32, ink, true);
+        var others: usize = 0;
+        for (0..s.crossings.len) |other| others += @intFromBool(other != crossing and u.bridgePlannable(other));
+        if (others > 0 and button("Next bridge", 767, 210, 118, 32)) {
+            var next = (crossing + 1) % s.crossings.len;
+            while (!u.bridgePlannable(next)) next = (next + 1) % s.crossings.len;
+            u.crossing = next;
+            u.modal_note = null;
+            return;
+        }
+        if (built) {
             label("Move a settler to a free bed on the other island.", 309, 276, 19, ink, false);
-            for (s.chart_names[0..2], 0..) |name, chart| {
+            for (c.charts, names, 0..) |chart, name, row| {
                 num("{s}   {d} resident{s}   /   {d} places available", .{
                     name, u.g.residents(chart), if (u.g.residents(chart) == 1) "" else "s", u.g.freeLandingSpace(chart),
-                }, 309, 310 + a.f(chart) * 30, 19, ink);
+                }, 309, 310 + a.f(row) * 30, 19, ink);
             }
-            if (button("Move 1 to Java", 309, 376, 278, 36)) {
-                u.modal_note = u.dispatch(.{ .cross_bridge = 0 }).problem() orelse "A settler crossed to Java.";
+            var caption: [2][64]u8 = undefined;
+            for (c.charts, names, 0..) |chart, name, side| {
+                const x = 309 + a.f(side) * 298;
+                const move = std.fmt.bufPrintSentinel(&caption[side], "Move 1 to {s}", .{name}, 0) catch unreachable;
+                if (button(move, x, 376, 278, 36)) {
+                    u.modal_note = u.dispatch(.{ .cross_bridge = .{ .crossing = crossing, .destination = chart } }).problem() orelse "A settler crossed the bridge.";
+                }
+                const transfer = std.fmt.bufPrintSentinel(&caption[side], "Transfer stores from {s}", .{name}, 0) catch unreachable;
+                if (button(transfer, x, 424, 278, 36)) u.openManifest(.{ .bridge = .{ .crossing = crossing, .source = chart } });
             }
-            if (button("Move 1 to Bali", 607, 376, 278, 36)) {
-                u.modal_note = u.dispatch(.{ .cross_bridge = 1 }).problem() orelse "A settler crossed to Bali.";
-            }
-            if (button("Transfer stores from Java", 309, 424, 278, 36)) u.openManifest(.{ .bridge = 0 });
-            if (button("Transfer stores from Bali", 607, 424, 278, 36)) u.openManifest(.{ .bridge = 1 });
         } else {
-            num("{d} spans of {d} allowed. Both islands supply materials and crew.", .{ s.bridge_spans, s.max_bridge_spans }, 309, 276, 19, ink);
+            num("{d} span{s} of {d} allowed. Both islands supply materials and crew.", .{
+                c.spans, if (c.spans == 1) "" else "s", s.max_bridge_spans,
+            }, 309, 276, 19, ink);
             label("Timber", 537, 333, 16, muted, false);
             label("Stone", 657, 333, 16, muted, false);
             label("Crew", 779, 333, 16, muted, false);
-            for (s.chart_names[0..2], 0..) |name, chart| {
+            for (c.charts, names, 0..) |chart, name, row| {
                 const local = u.g.stores[chart];
-                const y = 368 + a.f(chart) * 37;
+                const y = 368 + a.f(row) * 37;
                 label(name, 309, y, 20, ink, true);
-                num("{d} / {d}", .{ local.timber, s.bridge_cost.timber }, 537, y, 19, ink);
-                num("{d} / {d}", .{ local.stone, s.bridge_cost.stone }, 657, y, 19, ink);
+                num("{d} / {d}", .{ local.timber, c.cost.timber }, 537, y, 19, ink);
+                num("{d} / {d}", .{ local.stone, c.cost.stone }, 657, y, 19, ink);
                 num("{d} / {d}", .{ u.g.residents(chart), s.bridge_crew }, 779, y, 19, ink);
             }
             if (button("Build bridge", 708, footer_y, 177, 36)) {
-                if (u.dispatch(.build_bridge).problem()) |failure| {
+                if (u.dispatch(.{ .build_bridge = crossing }).problem()) |failure| {
                     u.playCue(.denied);
                     u.modal_note = failure;
                 } else {
-                    u.playCue(if (u.g.charterComplete()) .beacon else .build);
+                    const opened_shipyard = crossing == s.strait and u.g.charterComplete();
+                    u.playCue(if (opened_shipyard) .beacon else .build);
                     u.view = .{};
-                    u.msg = if (u.g.charterComplete()) "Bridge open. The shipyard is ready to build exploration ships." else "The bridge is open to settlers and supplies.";
+                    if (opened_shipyard) {
+                        u.msg = "Bridge open. The shipyard is ready to build exploration ships.";
+                    } else u.setMessage("The {s} bridge is open to settlers and supplies.", .{names[1]});
                     u.closeModal();
                 }
             }
         }
-        if (u.g.islandOpen(2)) {
+        if (crossing == s.strait and u.g.islandOpen(2)) {
             num("Bali to Lombok needs {d} spans. The bridge limit is {d}.", .{ s.bali_lombok_spans, s.max_bridge_spans }, 309, footer_y - 69, 17, muted);
         }
         if (u.modal_note) |note| label(note, 309, footer_y - 37, 17, ink, false);
@@ -343,12 +398,12 @@ const UI = struct {
         const loading = u.loading;
         const source = switch (loading) {
             .ferry => u.g.mooredChart() orelse u.g.ferry.origin,
-            .bridge => |port| port,
+            .bridge => |transfer| transfer.source,
             .expedition => 0,
         };
         const target = switch (loading) {
             .ferry => |voyage| voyage.to,
-            .bridge => 1 - source,
+            .bridge => |transfer| s.crossings[transfer.crossing].across(source),
             .expedition => |voyage| s.ocean.routes[voyage.to].chart,
         };
         const survey = switch (loading) {
@@ -389,7 +444,7 @@ const UI = struct {
         const limits = switch (loading) {
             .ferry => u.g.ferryCargoLimit(target, u.boarding),
             .expedition => |voyage| u.g.oceanCargoLimit(u.ship_id, voyage.to, u.boarding),
-            .bridge => u.g.bridgeCargoLimit(source),
+            .bridge => |transfer| u.g.bridgeCargoLimit(transfer.crossing, source),
         };
         const room = hold -| rations.units();
         var remaining = room;
@@ -443,7 +498,7 @@ const UI = struct {
                     .{ .survey_island = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }
                 else
                     .{ .send_expedition = .{ .ship = u.ship_id, .route = voyage.to, .manifest = manifest } }).problem(),
-                .bridge => u.dispatch(.{ .transfer_stores = .{ .source = source, .cargo = u.cargo_manifest } }).problem(),
+                .bridge => |transfer| u.dispatch(.{ .transfer_stores = .{ .crossing = transfer.crossing, .source = source, .cargo = u.cargo_manifest } }).problem(),
             };
             if (failure) |problem| {
                 u.playCue(.denied);
@@ -955,9 +1010,10 @@ const UI = struct {
         if (inset_hit) |chart| {
             if (pressed) u.selectIsland(chart, true);
         }
-        const region_button_x: f32 = if (u.g.bridge) 158 else 23;
+        const bridges_button = u.showBridgesButton();
+        const region_button_x: f32 = if (bridges_button) 158 else 23;
         const inside = !menu_handled and !over_inset and over(0, 84, 895, 492) and !over(region_button_x, 101, 127, 32) and
-            !(u.g.bridge and over(23, 101, 123, 32));
+            !(bridges_button and over(23, 101, 123, 32));
         const click = !menu_handled and u.view.input(mouse, inside, dt);
         const choosing_region = u.view.zoom < chart_view.settlement_detail_zoom;
         const regional_hit = if (inside and choosing_region) chart_view.pickIsland(u.view.world(mouse), u.view.zoom, &u.g) else null;
@@ -1043,10 +1099,7 @@ const UI = struct {
         u.drawHeader(&ledger);
         const supply = ledger.production;
         const demand = ledger.daily_demand;
-        if (u.g.bridge and button("Cross bridge", 23, 101, 123, 32)) {
-            u.modal = .bridge;
-            u.modal_note = null;
-        }
+        if (bridges_button and button("Bridges", 23, 101, 123, 32)) u.openBridges(null);
         if (button(if (regional) "Local map" else "Regional map", region_button_x, 101, 127, 32)) {
             if (regional) u.view = .{} else u.view.showRegion();
         }
@@ -1074,10 +1127,7 @@ const UI = struct {
             r.drawCircleLinesV(a.v(924, y + 8), 5, a.c(muted));
             label(goal.title(), 943, y, 16, ink, false);
             if (goal == .build_fleet) num("{d}/{d}", .{ u.g.fleet.count, s.charter_fleet_size }, 1142, y, 15, muted);
-            if (goal == .bridge and button("Plan", 1100, y - 5, 78, 27)) {
-                u.modal = .bridge;
-                u.modal_note = null;
-            }
+            if (goal == .bridge and button("Plan", 1100, y - 5, 78, 27)) u.openBridges(s.strait);
         }
         a.rect(916, 338, 261, 1, 0xc5c6ae);
         label(s.chart_names[u.store_chart], 915, 353, 27, ink, true);
