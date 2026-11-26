@@ -1,6 +1,6 @@
 // Simplified Natural Earth 1:10m land polygons projected onto the game chart.
 // Coast vertices are in chart units. Triangles index the vertices of each island.
-const geography = @import("core").geography;
+const geography = @import("geography.zig");
 
 pub const Point = [2]i16;
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const r = @import("raylib");
 const s = @import("core").colony;
 const roads = @import("core").roads;
-const region = @import("region.zig");
+const region = @import("core").region;
 // The hand-drawn island art was drawn for each island's first, smaller
 // layout. These place and scale it on the chart.
 const art_origins = [_][2]f32{
@@ -290,29 +290,16 @@ pub fn regionalLand(upper_left: V, lower_right: V) void {
     }
 }
 
-fn artDockOffset(chart: usize) V {
-    if (chart >= s.geography.first_additional) {
-        const offset = s.geography.sites.all[chart - s.geography.first_additional].berth_offset;
-        return v(offset[0], offset[1]);
-    }
-    return switch (chart) {
-        s.geography.borneo => v(0, 45),
-        s.geography.sumatra => v(-61, 23),
-        s.geography.palawan => v(75, 37),
-        else => v(65, 37),
-    };
+fn toV(p: s.ferry.Point) V {
+    return v(p[0], p[1]);
 }
 
 fn dockOffset(chart: usize) V {
-    const offset = artDockOffset(chart);
-    const ratio = art_scales[chart] / s.geography.tile_scale;
-    return v(offset.x * ratio, offset.y * ratio);
+    return toV(s.ferry.dockOffset(chart));
 }
 
 fn berth(chart: usize) V {
-    const shore = tile(s.quay(chart));
-    const offset = dockOffset(chart);
-    return worldPoint(chart, v(shore.x + offset.x, shore.y + offset.y));
+    return toV(s.ferry.berth(chart));
 }
 
 fn bridgePoint(progress: f32, y_offset: f32) V {
@@ -356,93 +343,18 @@ pub fn bridgeTraffic(g: *const s.Game, t: f32) void {
 }
 
 fn seaRoute(start: V, depart: V, approach: V, end: V, progress: f32) V {
-    const t = progress;
-    const u = 1 - t;
-    return v(
-        u * u * u * start.x + 3 * u * u * t * depart.x + 3 * u * t * t * approach.x + t * t * t * end.x,
-        u * u * u * start.y + 3 * u * u * t * depart.y + 3 * u * t * t * approach.y + t * t * t * end.y,
-    );
+    return toV(s.ferry.seaRoute(.{ start.x, start.y }, .{ depart.x, depart.y }, .{ approach.x, approach.y }, .{ end.x, end.y }, progress));
 }
 
 // The harbor boat rounds the southern shores before approaching Bali.
 pub fn shipPosition(progress: f32) V {
-    const start = berth(0);
-    const end = berth(1);
-    return seaRoute(start, v(start.x + 190, start.y + 210), v(end.x + 92, end.y + 200), end, progress);
+    return toV(s.ferry.straitCourse(progress));
 }
 
-/// The ferry's course between two harbors in range of each other. The Bali
-/// Strait crossing keeps its hand-drawn course. Other legs leave and enter
-/// each harbor along its seaward approach, bending around any island between.
+/// The ferry's course between two harbors in range of each other, as the
+/// core plans it, so the boat never sails over land the lanes avoid.
 pub fn ferryPosition(from: usize, to: usize, progress: f32) V {
-    if (from == to) return berth(from);
-    if (from == 0 and to == 1) return shipPosition(progress);
-    if (from == 1 and to == 0) return shipPosition(1 - progress);
-    return bentCourse(from, to, courseBend(from, to), progress);
-}
-
-/// Courses tried in order: how far the ferry stands out along each harbor's
-/// approach, and how far it bends sideways, as fractions of the leg's length.
-const Bend = struct { reach: f32, side: f32 };
-const course_bends = [_]Bend{
-    .{ .reach = 0.3, .side = 0 },     .{ .reach = 0.3, .side = 0.25 }, .{ .reach = 0.3, .side = -0.25 },
-    .{ .reach = 0.15, .side = 0 },    .{ .reach = 0, .side = 0 },      .{ .reach = 0.3, .side = 0.5 },
-    .{ .reach = 0.3, .side = -0.5 },  .{ .reach = 0.1, .side = 0.15 }, .{ .reach = 0.1, .side = -0.15 },
-    .{ .reach = 0.3, .side = 0.8 },   .{ .reach = 0.3, .side = -0.8 },
-};
-
-fn bentCourse(from: usize, to: usize, bend: Bend, progress: f32) V {
-    const start = berth(from);
-    const end = berth(to);
-    const length = r.math.vector2Distance(start, end);
-    const out = r.math.vector2Normalize(dockOffset(from));
-    const in = r.math.vector2Normalize(dockOffset(to));
-    const across = v((start.y - end.y) / length, (end.x - start.x) / length);
-    const reach = bend.reach * length;
-    const side = bend.side * length;
-    return seaRoute(
-        start,
-        v(start.x + out.x * reach + across.x * side, start.y + out.y * reach + across.y * side),
-        v(end.x + in.x * reach + across.x * side, end.y + in.y * reach + across.y * side),
-        end,
-        progress,
-    );
-}
-
-/// Whether a point lies on the land of an island other than the two given.
-fn overOtherLand(pos: V, from: usize, to: usize) bool {
-    for (0..s.settlement_count) |chart| {
-        if (chart == from or chart == to) continue;
-        if (pick(localPoint(chart, pos), chart)) |cell| {
-            if (s.depth(cell, chart) >= 0) return true;
-        }
-    }
-    return false;
-}
-
-pub fn courseIsClear(from: usize, to: usize, bend: Bend) bool {
-    for (1..120) |step| {
-        if (overOtherLand(bentCourse(from, to, bend, f(step) / 120), from, to)) return false;
-    }
-    return true;
-}
-
-/// Index into `course_bends` for each leg, worked out the first time the
-/// leg is drawn. -1 means not yet worked out.
-var bend_choice: [s.settlement_count][s.settlement_count]i8 = @splat(@splat(-1));
-
-fn courseBend(from: usize, to: usize) Bend {
-    if (bend_choice[from][to] < 0) {
-        var choice: usize = 0;
-        for (course_bends, 0..) |bend, index| {
-            if (courseIsClear(from, to, bend)) {
-                choice = index;
-                break;
-            }
-        }
-        bend_choice[from][to] = @intCast(choice);
-    }
-    return course_bends[@intCast(bend_choice[from][to])];
+    return toV(s.ferry.coursePosition(from, to, progress));
 }
 
 pub fn ship(g: *const s.Game, time: f32) void {

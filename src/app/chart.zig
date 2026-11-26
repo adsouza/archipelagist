@@ -2,7 +2,7 @@ const std = @import("std");
 const r = @import("raylib");
 const a = @import("art.zig");
 const s = @import("core").colony;
-const region = @import("region.zig");
+const region = @import("core").region;
 
 const middle = a.v(447.5, 330);
 const fit_zoom: f32 = 0.62;
@@ -294,19 +294,14 @@ test "ship stays on water between the two quays" {
     }
 }
 
-test "every ferry leg stays clear of the islands it does not call at" {
+test "the drawn ferry stays at sea on every leg, its own islands included" {
     for (0..s.settlement_count) |from| {
         for (s.ferry.neighbors(from).slice()) |to| {
-            for (1..200) |step| {
-                const pos = a.ferryPosition(from, to, a.f(step) / 200);
-                for (0..s.geography.names.len) |chart| {
-                    if (chart == from or chart == to) continue;
-                    if (a.pick(a.localPoint(chart, pos), chart)) |cell| {
-                        if (s.depth(cell, chart) >= 0) {
-                            std.debug.print("{s} to {s} crosses {s}\n", .{ s.chart_names[from], s.chart_names[to], s.chart_names[chart] });
-                            return error.TestUnexpectedResult;
-                        }
-                    }
+            for (0..401) |step| {
+                const pos = a.ferryPosition(from, to, a.f(step) / 400);
+                if (s.ferry.onLand(.{ pos.x, pos.y }, from, to)) {
+                    std.debug.print("{s} to {s} crosses land at step {d}\n", .{ s.chart_names[from], s.chart_names[to], step });
+                    return error.TestUnexpectedResult;
                 }
             }
         }

@@ -33,6 +33,7 @@ pub const policy = [_]Folder{
         .layers = &.{
             .{ .files = &.{ "terrain.zig", "island_grids.zig", "settlement_sites.zig", "ferry_lanes.zig" } },
             .{ .files = &.{"geography.zig"} },
+            .{ .files = &.{"region.zig"} },
             .{ .files = &.{"expedition.zig"} },
             .{ .files = &.{ "colony.zig", "fleet.zig", "ferry.zig", "bridge.zig", "charter.zig", "roads.zig" }, .mutual = true },
             .{ .files = &.{ "gameplay.zig", "queries.zig", "stock_warnings.zig", "save.zig" } },
@@ -56,7 +57,7 @@ pub const policy = [_]Folder{
         .name = "app",
         .modules = &.{ "builtin", "core", "shell", "raylib" },
         .layers = &.{
-            .{ .files = &.{ "region.zig", "audio.zig", "window_settings.zig" } },
+            .{ .files = &.{ "audio.zig", "window_settings.zig" } },
             .{ .files = &.{"art.zig"} },
             .{ .files = &.{"chart.zig"} },
             .{ .files = &.{ "main.zig", "presentation_tests.zig" } },

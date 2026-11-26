@@ -11,6 +11,7 @@ pub const save = @import("save.zig");
 pub const journal = @import("journal.zig");
 pub const roads = @import("roads.zig");
 pub const geography = @import("geography.zig");
+pub const region = @import("region.zig");
 
 test {
     _ = colony;
