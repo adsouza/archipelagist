@@ -952,9 +952,14 @@ const UI = struct {
                 if (failure == null and u.tool == .well and u.g.countOn(chart, .well) > s.waterCapacity(chart) / s.well_yield) {
                     u.msg = "Well built. The island already has enough wells to reach its daily water limit.";
                 }
+                if (failure == null and s.needsHarbor(u.tool) and !u.g.connected(chart, p)) {
+                    u.msg = "Built, but settlers can't reach it yet. Lay roads from the harbor to start production.";
+                }
             } else if (s.depth(p, chart) >= 0) {
                 const k = u.g.tileAt(chart, p);
-                if (u.g.harvestStatus(chart, p)) |harvest| {
+                if (s.needsHarbor(k) and !u.g.connected(chart, p)) {
+                    u.setMessage("{s} is idle. Lay roads from the harbor so settlers can work it.", .{s.names[@backingInt(k)]});
+                } else if (u.g.harvestStatus(chart, p)) |harvest| {
                     const name = s.names[@backingInt(k)];
                     const resource = if (k == .grove) "timber" else "venison";
                     if (harvest.days_to_recover > 0) {

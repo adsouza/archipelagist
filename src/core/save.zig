@@ -876,6 +876,8 @@ test "woodlots and hunting lodges resume their recovery after reload" {
     const herd = s.Cell{ .x = 30, .y = 35 };
     try std.testing.expect(g.build(0, woods, .grove) == null);
     try std.testing.expect(g.build(0, herd, .lodge) == null);
+    g.paveTo(0, woods);
+    g.paveTo(0, herd);
 
     g = decode(&encode(g)).?;
     for (0..4) |day| {

@@ -175,6 +175,11 @@ pub fn requiredQuarrySites(chart: usize) usize {
     return if (chart == 0) opening_quarry_sites else min_quarry_sites;
 }
 
+/// Producers that deliver only when settlers can walk to them from the harbor.
+pub fn needsHarbor(k: Kind) bool {
+    return k == .quarry or k == .grove or k == .lodge;
+}
+
 pub const day_seconds: f32 = 7;
 
 pub fn dailyUse(people: u16) u16 {
@@ -359,6 +364,72 @@ pub const Game = struct {
         return total;
     }
 
+    /// Buildings of a kind that settlers can reach from the harbor.
+    pub fn connectedCount(g: *const Game, chart: usize, k: Kind, walk: *const roads.Walk) u16 {
+        var total: u16 = 0;
+        for (g.tilesOn(chart), 0..) |tile, i| {
+            if (tile.kind == k and walk.seen.isSet(i)) total += 1;
+        }
+        return total;
+    }
+
+    /// Whether settlers can walk from the harbor to this tile.
+    pub fn connected(g: *const Game, chart: usize, p: Cell) bool {
+        return roads.Walk.fromPort(g.tilesOn(chart), chart).contains(p);
+    }
+
+    /// The shortest run of empty tiles a road must cover so that a building on
+    /// `target` joins the tiles settlers already reach from the harbor, listed
+    /// from the harbor side. Null when no land path exists or `out` is too short.
+    pub fn roadPath(g: *const Game, chart: usize, target: Cell, out: []Cell) ?[]Cell {
+        const grid = geography.grids[chart];
+        if (!grid.contains(target) or depth(target, chart) < 0) return null;
+        const tiles = g.tilesOn(chart);
+        const walk = roads.Walk.fromPort(tiles, chart);
+        if (walk.contains(target)) return out[0..0];
+        const none = std.math.maxInt(u32);
+        var from: [geography.max_grid_area]u32 = undefined;
+        var queue: [geography.max_grid_area]u32 = undefined;
+        @memset(from[0..grid.area()], none);
+        var head: usize = 0;
+        var tail: usize = 0;
+        const start = grid.index(target);
+        from[start] = @intCast(start);
+        queue[tail] = @intCast(start);
+        tail += 1;
+        while (head < tail) : (head += 1) {
+            const at = queue[head];
+            if (walk.seen.isSet(at)) {
+                var len: usize = 0;
+                var step = from[at];
+                while (step != start) : (step = from[step]) {
+                    if (len == out.len) return null;
+                    out[len] = grid.cell(step);
+                    len += 1;
+                }
+                return out[0..len];
+            }
+            for (roads.directions) |direction| {
+                const next = roads.neighbor(grid.cell(at), direction, grid) orelse continue;
+                const i = grid.index(next);
+                if (from[i] != none or depth(next, chart) < 0) continue;
+                // Roads can't replace buildings or fruit trees the walk hasn't reached.
+                if (!walk.seen.isSet(i) and (tiles[i].kind != .empty or site(next, chart) == .fruit)) continue;
+                from[i] = at;
+                queue[tail] = @intCast(i);
+                tail += 1;
+            }
+        }
+        return null;
+    }
+
+    /// Test support: lays free road so a building on `target` joins the harbor.
+    pub fn paveTo(g: *Game, chart: usize, target: Cell) void {
+        var buffer: [geography.max_grid_area]Cell = undefined;
+        const path = g.roadPath(chart, target, &buffer) orelse unreachable;
+        for (path) |cell| g.tiles[tileIndex(chart, cell)] = .{ .kind = .road };
+    }
+
     pub fn count(g: *const Game, k: Kind) u16 {
         var total: u16 = 0;
         for (0..settlement_count) |chart| total += g.countOn(chart, k);
@@ -461,9 +532,8 @@ pub const Game = struct {
         return weakness_limit - diet.meat_deficit;
     }
 
-    fn connectedFruitTrees(g: *const Game, chart: usize) u16 {
+    fn connectedFruitTrees(g: *const Game, chart: usize, walk: *const roads.Walk) u16 {
         const tiles = g.tilesOn(chart);
-        const walk = roads.Walk.fromPort(tiles, chart);
         var fruit: u16 = 0;
         var visited = walk.seen.iterator(.{});
         while (visited.next()) |i| {
@@ -485,22 +555,24 @@ pub const Game = struct {
     fn productionForDay(g: *const Game, chart: usize, room: Stores, update: ?[]Tile) Stores {
         const harbor: u16 = @intFromBool(g.islandOpen(chart));
         const strength = g.workforce(chart);
+        // Producers deliver only when settlers can walk to them from the harbor.
+        const walk = roads.Walk.fromPort(g.tilesOn(chart), chart);
         const harvested = if (harbor > 0 and (strength > 0 or update != null))
-            g.harvest(chart, strength, .{ .timber = room.timber -| harbor, .venison = room.venison }, update)
+            g.harvest(chart, strength, .{ .timber = room.timber -| harbor, .venison = room.venison }, &walk, update)
         else
             Stores{};
         if (strength == 0) return .{ .timber = harbor, .grain = harbor };
         return .{
             .timber = harbor +| harvested.timber,
-            .stone = workerOutput(quarry_yield * @as(u32, g.countOn(chart, .quarry)), strength),
+            .stone = workerOutput(quarry_yield * @as(u32, g.connectedCount(chart, .quarry, &walk)), strength),
             .grain = harbor +| workerOutput(5 * @as(u32, g.countOn(chart, .farm)), strength),
             .venison = harvested.venison,
-            .fruit = workerOutput(fruit_yield * @as(u32, g.connectedFruitTrees(chart)), strength),
+            .fruit = workerOutput(fruit_yield * @as(u32, g.connectedFruitTrees(chart, &walk)), strength),
             .water = workerOutput(@min(waterCapacity(chart), well_yield * @as(u32, g.countOn(chart, .well))), strength),
         };
     }
 
-    fn harvest(g: *const Game, chart: usize, strength: u16, room: Stores, update: ?[]Tile) Stores {
+    fn harvest(g: *const Game, chart: usize, strength: u16, room: Stores, walk: *const roads.Walk, update: ?[]Tile) Stores {
         var timber_potential: u32 = 0;
         var venison_potential: u32 = 0;
         var output = Stores{};
@@ -518,7 +590,8 @@ pub const Game = struct {
             const stock = if (kind == .grove) &output.timber else &output.venison;
             const limit = if (kind == .grove) room.timber else room.venison;
             const previous = workerOutput(potential.*, strength);
-            potential.* += @min(harvest_yield, status.stock);
+            // An unconnected woodlot or lodge sits idle and its stock recovers.
+            if (walk.seen.isSet(i)) potential.* += @min(harvest_yield, status.stock);
             const amount = @min(limit - stock.*, workerOutput(potential.*, strength) - previous);
             stock.* += amount;
             if (update) |states| {
@@ -669,10 +742,13 @@ test "settlement can feed settlers, trade, survey, and commission its lighthouse
     try std.testing.expect(g.build(0, .{ .x = 39, .y = 49 }, .road) == null);
     for (0..3) |_| _ = g.tick();
     try std.testing.expect(g.build(0, .{ .x = 30, .y = 35 }, .lodge) == null);
+    g.paveTo(0, .{ .x = 30, .y = 35 });
     for (0..6) |_| _ = g.tick();
     try std.testing.expect(g.build(0, .{ .x = 58, .y = 35 }, .lodge) == null);
+    g.paveTo(0, .{ .x = 58, .y = 35 });
     for (0..10) |_| _ = g.tick();
     try std.testing.expect(g.build(0, .{ .x = 35, .y = 53 }, .quarry) == null);
+    g.paveTo(0, .{ .x = 35, .y = 53 });
     for (0..4) |_| _ = g.tick();
     const cottage = Cell{ .x = 39, .y = 44 };
     const starter = Cell{ .x = 44, .y = 44 };
@@ -710,6 +786,8 @@ test "roads spend stone and deer feed settlers while grain remains tradable" {
     try std.testing.expect(g.build(0, road, .lodge) != null);
     try std.testing.expect(g.build(0, .{ .x = 35, .y = 53 }, .quarry) == null);
     try std.testing.expect(g.build(0, .{ .x = 30, .y = 35 }, .lodge) == null);
+    g.paveTo(0, .{ .x = 35, .y = 53 });
+    g.paveTo(0, .{ .x = 30, .y = 35 });
     g.stores[0].grain = 6;
     g.stores[0].venison = 0;
     _ = g.tick();
@@ -823,6 +901,7 @@ test "islands consume and produce supplies locally" {
     g.advanceShip(crossing_seconds);
     try std.testing.expect(g.build(1, .{ .x = 24, .y = 24 }, .cottage) == null);
     try std.testing.expect(g.build(1, .{ .x = 24, .y = 33 }, .quarry) == null);
+    g.paveTo(1, .{ .x = 24, .y = 33 });
     const alder_water = g.stores[0].water;
     g.stores[1].water = 0;
     const shortages = g.tick();
@@ -992,14 +1071,45 @@ test "quarry sites stop at the reach limit and at the water's edge" {
     try std.testing.expect(site(.{ .x = 35, .y = 53 }, 0) == .outcrop);
 }
 
-test "the opening settlers can quarry stone near Java's harbor" {
+test "the opening settlers can quarry and connect two quarries near Java's harbor with starting stores" {
     var g = Game.init();
-    const sites = quarrySites(0);
-    const affordable = starting_stores.timber / costs[@backingInt(Kind.quarry)];
-    const built = @min(affordable, sites.len);
-    try std.testing.expect(built >= 2);
-    for (sites.slice()[0..built]) |cell| try std.testing.expect(g.build(0, cell, .quarry) == null);
+    var connected_quarries: usize = 0;
+    var buffer: [64]Cell = undefined;
+    for (quarrySites(0).slice()) |cell| {
+        if (connected_quarries == 2) break;
+        const path = g.roadPath(0, cell, &buffer) orelse continue;
+        if (path.len * costs[@backingInt(Kind.road)] > g.stores[0].stone) continue;
+        try std.testing.expect(g.build(0, cell, .quarry) == null);
+        try std.testing.expect(!g.connected(0, cell) or path.len == 0);
+        for (path) |step| try std.testing.expect(g.build(0, step, .road) == null);
+        try std.testing.expect(g.connected(0, cell));
+        connected_quarries += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), connected_quarries);
     const before = g.stores[0].stone;
     _ = g.tick();
     try std.testing.expect(g.stores[0].stone > before);
+}
+
+test "quarries, woodlots and lodges produce only once settlers can reach them" {
+    var g = Game.init();
+    g.stores[0] = .{ .timber = 100, .stone = 0, .grain = 100, .venison = 100, .fruit = 100, .water = 100 };
+    const quarry = Cell{ .x = 35, .y = 53 };
+    const herd = Cell{ .x = 30, .y = 35 };
+    try std.testing.expect(g.build(0, quarry, .quarry) == null);
+    try std.testing.expect(g.build(0, herd, .lodge) == null);
+    try std.testing.expect(!g.connected(0, quarry) and !g.connected(0, herd));
+    const idle = g.production(0);
+    try std.testing.expectEqual(@as(u16, 0), idle.stone);
+    try std.testing.expectEqual(@as(u16, 0), idle.venison);
+    _ = g.tick();
+    try std.testing.expectEqual(@as(u16, 0), g.stores[0].stone);
+    try std.testing.expectEqual(@as(u4, harvest_capacity), g.harvestStatus(0, herd).?.stock);
+    g.paveTo(0, quarry);
+    g.paveTo(0, herd);
+    try std.testing.expect(g.connected(0, quarry) and g.connected(0, herd));
+    try std.testing.expectEqual(quarry_yield, g.production(0).stone);
+    try std.testing.expect(g.production(0).venison > 0);
+    try std.testing.expect(needsHarbor(.quarry) and needsHarbor(.grove) and needsHarbor(.lodge));
+    try std.testing.expect(!needsHarbor(.farm) and !needsHarbor(.well) and !needsHarbor(.road));
 }

@@ -205,11 +205,20 @@ fn quarryCase(seed: u64) !void {
     const sites = domain.quarrySites(chart);
     try std.testing.expect(sites.len >= domain.requiredQuarrySites(chart));
 
-    // Every listed stone source accepts a quarry through the command path.
+    // Every listed stone source accepts a quarry through the command path,
+    // which sits idle until roads join it to the harbor.
     const cell = sites.slice()[random.uintLessThan(usize, sites.len)];
-    const before = game.stores[chart].stone;
     try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = cell, .kind = .quarry } }) == .applied);
+    const reached = game.connected(chart, cell);
+    try std.testing.expectEqual(reached, queries.ledger(&game, chart).production.stone > 0);
+    var buffer: [4 * domain.quarry_reach * domain.quarry_reach]domain.Cell = undefined;
+    const path = game.roadPath(chart, cell, &buffer) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(reached == (path.len == 0));
+    game.stores[chart].stone = @intCast(path.len);
+    for (path) |step| try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = chart, .cell = step, .kind = .road } }) == .applied);
+    try std.testing.expect(game.connected(chart, cell));
     try std.testing.expect(queries.ledger(&game, chart).production.stone > 0);
+    const before = game.stores[chart].stone;
     _ = gameplay.apply(&game, .{ .advance = gameplay.untilNextDay(&game) });
     try std.testing.expect(game.stores[chart].stone > before);
 
@@ -400,6 +409,8 @@ fn harvestCase(seed: u64) !void {
     const herd = domain.Cell{ .x = 30, .y = 35 };
     try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = 0, .cell = woods, .kind = .grove } }) == .applied);
     try std.testing.expect(gameplay.apply(&game, .{ .build = .{ .island = 0, .cell = herd, .kind = .lodge } }) == .applied);
+    game.paveTo(0, woods);
+    game.paveTo(0, herd);
     var next: domain.Game = undefined;
     var observed_rest = false;
     const days = random.intRangeAtMost(u32, 7, 18);
